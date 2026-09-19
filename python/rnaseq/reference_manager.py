@@ -1,0 +1,444 @@
+"""Reference database manager: selection, download, validation, compatibility checks, HISAT2 index."""
+import gzip
+import hashlib
+import os
+import re
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+from . import PipelineError, net, runner, ui
+from . import config as C
+
+IUPAC = b"ACGTNacgtnRYKMSWBDHVrykmswbdhv-*"
+GTF_STRANDS = {"+", "-", "."}
+
+
+# ------------------------------ checksums ------------------------------
+
+def bsd_sum(path):
+    """BSD 16-bit checksum as printed by `sum` (used in Ensembl CHECKSUMS)."""
+    s = 0
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            size += len(chunk)
+            for b in chunk:
+                s = ((s >> 1) + ((s & 1) << 15) + b) & 0xFFFF
+    return s, (size + 1023) // 1024
+
+
+def bsd_sum_fast(path):
+    """Same as bsd_sum but uses the coreutils `sum` binary when available (much faster)."""
+    exe = shutil.which("sum")
+    if exe:
+        out = runner.tool_output([exe, str(path)], timeout=3600)
+        if out:
+            parts = out.split()
+            return int(parts[0]), int(parts[1])
+    return bsd_sum(path)
+
+
+def expected_checksum(pkg, part, filename):
+    """Return ('md5', hex) or ('bsd_sum', (sum, blocks)) or None."""
+    ck = pkg.get("checksum", {})
+    url = pkg[part].get("checksum_url") or ck.get("url")
+    if not url:
+        return None
+    try:
+        text = net.get_text(url)
+    except PipelineError:
+        ui.warn(f"could not fetch checksum list {url}; file integrity will rely on gzip test only")
+        return None
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[-1].lstrip("./")
+        if name.endswith(filename):
+            if ck.get("type") == "bsd_sum" and len(parts) >= 3:
+                return ("bsd_sum", (int(parts[0]), int(parts[1])))
+            if ck.get("type") == "md5":
+                return ("md5", parts[0])
+    return None
+
+
+def verify_checksum(path, expected):
+    if expected is None:
+        return None
+    kind, val = expected
+    got = net.md5(path) if kind == "md5" else bsd_sum_fast(path)
+    if kind == "bsd_sum":
+        return got[0] == val[0]
+    return got == val
+
+
+# ------------------------------ validation ------------------------------
+
+def validate_fasta(path, fai_path=None):
+    """Stream FASTA; return {names: [..], lengths: {..}, total_bp}. Raises PipelineError on format problems."""
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        raise PipelineError(f"genome FASTA missing or empty: {path}", stage="reference")
+    names, lengths, seen = [], {}, set()
+    cur, n = None, 0
+    opener = gzip.open if path.name.endswith(".gz") else open
+    with opener(path, "rb") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.rstrip(b"\r\n")
+            if line.startswith(b">"):
+                if cur is not None:
+                    lengths[cur] = n
+                name = line[1:].split(None, 1)[0].decode(errors="replace") if len(line) > 1 else ""
+                if not name:
+                    raise PipelineError(f"FASTA header without a name at line {lineno}", stage="reference")
+                if name in seen:
+                    raise PipelineError(f"duplicate sequence name in FASTA: {name}", stage="reference")
+                seen.add(name)
+                names.append(name)
+                cur, n = name, 0
+            else:
+                if cur is None:
+                    if line.strip():
+                        raise PipelineError("FASTA does not start with a '>' header", stage="reference",
+                                            cause=f"{path} may not be a FASTA file")
+                    continue
+                bad = line.translate(None, IUPAC)
+                if bad:
+                    raise PipelineError(f"invalid characters in FASTA sequence at line {lineno}",
+                                        stage="reference", cause=repr(bytes(sorted(set(bad))[:5])))
+                n += len(line)
+    if cur is not None:
+        lengths[cur] = n
+    if not names:
+        raise PipelineError("FASTA contains no sequences", stage="reference")
+    zero = [k for k, v in lengths.items() if v == 0]
+    if zero:
+        raise PipelineError(f"FASTA has empty sequences: {zero[:5]}", stage="reference")
+    return {"names": names, "lengths": lengths, "total_bp": sum(lengths.values()), "n_sequences": len(names)}
+
+
+ATTR_RE = re.compile(r'(\S+)\s+"([^"]*)"')
+
+
+def validate_gtf(path, attribute="gene_id"):
+    path = Path(path)
+    if not path.exists() or path.stat().st_size == 0:
+        raise PipelineError(f"annotation GTF missing or empty: {path}", stage="reference")
+    opener = gzip.open if path.name.endswith(".gz") else open
+    seq_max_end, genes, transcripts = {}, set(), set()
+    exons, features, header = 0, {}, []
+    missing_attr = 0
+    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+        for lineno, line in enumerate(f, 1):
+            if line.startswith("#"):
+                if len(header) < 20:
+                    header.append(line.strip())
+                continue
+            if not line.strip():
+                continue
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) != 9:
+                raise PipelineError(f"GTF line {lineno} has {len(cols)} columns (expected 9)", stage="reference",
+                                    cause="file is not GTF (GFF3 uses key=value attributes and is not supported "
+                                          "directly — convert with gffread -T)")
+            seq, _, ftype, start, end, _, strand, _, attrs = cols
+            try:
+                s, e = int(start), int(end)
+            except ValueError:
+                raise PipelineError(f"GTF line {lineno}: non-integer coordinates", stage="reference")
+            if s < 1 or e < s:
+                raise PipelineError(f"GTF line {lineno}: invalid interval {s}-{e}", stage="reference")
+            if strand not in GTF_STRANDS:
+                raise PipelineError(f"GTF line {lineno}: invalid strand {strand!r}", stage="reference")
+            if "=" in attrs and '"' not in attrs:
+                raise PipelineError("annotation looks like GFF3, not GTF", stage="reference",
+                                    remedy="convert with: gffread annotation.gff3 -T -o annotation.gtf")
+            features[ftype] = features.get(ftype, 0) + 1
+            if e > seq_max_end.get(seq, 0):
+                seq_max_end[seq] = e
+            if ftype == "exon":
+                exons += 1
+                a = dict(ATTR_RE.findall(attrs))
+                if attribute not in a or "transcript_id" not in a:
+                    missing_attr += 1
+                    continue
+                genes.add(a[attribute])
+                transcripts.add(a["transcript_id"])
+    if exons == 0:
+        raise PipelineError("GTF contains no 'exon' features", stage="reference",
+                            cause="featureCounts/StringTie need exon records")
+    if missing_attr > exons * 0.01:
+        raise PipelineError(f"{missing_attr} exon lines lack {attribute}/transcript_id", stage="reference",
+                            remedy="choose a standard GTF (GENCODE/Ensembl/UCSC)")
+    build = None
+    for h in header:
+        m = re.search(r"(GRC[hm]\d+|hg\d+|mm\d+|R64[-\d]*)", h)
+        if m and ("genome-build" in h or "description" in h or "assembly" in h.lower()):
+            build = m.group(1)
+            break
+    return {"seqnames": sorted(seq_max_end), "seq_max_end": seq_max_end, "genes": len(genes),
+            "transcripts": len(transcripts), "exons": exons, "feature_types": features,
+            "header_build": build, "attribute": attribute}
+
+
+def check_compatibility(fa, gtf, genome_assembly=None, annotation_assembly=None):
+    """Return (errors, warnings)."""
+    errors, warns = [], []
+    fa_names = set(fa["names"])
+    gtf_names = set(gtf["seqnames"])
+    shared = fa_names & gtf_names
+    if not shared:
+        hint = ""
+        if any(n.startswith("chr") for n in fa_names) != any(n.startswith("chr") for n in gtf_names):
+            hint = " (one file uses 'chr1' style names and the other '1' style — different providers)"
+        errors.append("no chromosome names are shared between genome FASTA and GTF" + hint)
+    else:
+        missing = gtf_names - fa_names
+        if missing:
+            frac = len(missing) / len(gtf_names)
+            msg = f"{len(missing)} GTF sequence(s) not in FASTA (e.g. {sorted(missing)[:3]})"
+            (errors if frac > 0.05 else warns).append(msg)
+        over = [s for s in shared if gtf["seq_max_end"][s] > fa["lengths"][s]]
+        if over:
+            errors.append(f"annotation coordinates exceed chromosome length on {len(over)} sequence(s) "
+                          f"(e.g. {over[0]}: GTF end {gtf['seq_max_end'][over[0]]:,} > length "
+                          f"{fa['lengths'][over[0]]:,}) — genome and annotation are from DIFFERENT assemblies")
+    if genome_assembly and annotation_assembly and _norm(genome_assembly) != _norm(annotation_assembly):
+        errors.append(f"declared assemblies differ: genome {genome_assembly} vs annotation {annotation_assembly}")
+    hb = gtf.get("header_build")
+    if hb and genome_assembly and _norm(hb) != _norm(genome_assembly):
+        errors.append(f"GTF header says build {hb}, but genome assembly is {genome_assembly}")
+    return errors, warns
+
+
+def _norm(a):
+    a = str(a).lower().replace(" ", "")
+    aliases = {"hg38": "grch38", "hg19": "grch37", "mm39": "grcm39", "mm10": "grcm38"}
+    a = re.sub(r"\.p\d+$", "", a)
+    return aliases.get(a, a)
+
+
+# ------------------------------ store / paths ------------------------------
+
+class RefPaths:
+    def __init__(self, base):
+        self.base = Path(base)
+        self.genome = self.base / "genome" / "genome.fa"
+        self.gtf = self.base / "annotation" / "annotation.gtf"
+        self.transcripts = self.base / "transcriptome" / "transcripts.fa.gz"
+        self.splice_sites = self.base / "annotation" / "splice_sites.txt"
+        self.exons = self.base / "annotation" / "exons.txt"
+        self.bed12 = self.base / "annotation" / "annotation.bed12"
+        self.index_dir = self.base / "index"
+        self.index_prefix = self.index_dir / "genome"
+        self.checksums = self.base / "checksums"
+        self.logs = self.base / "logs"
+        self.manifest = self.base / "reference_manifest.yaml"
+
+
+def store_dir(cfg, ref):
+    root = Path(os.path.expanduser(cfg.get("reference_store", "~/rnaseq_references")))
+    return root / ref["id"]
+
+
+def custom_id(fasta, gtf):
+    h = hashlib.sha1(f"{Path(fasta).resolve()}|{Path(gtf).resolve()}".encode()).hexdigest()[:8]
+    return f"custom_{h}"
+
+
+def packages_for(catalog, organism):
+    return {k: v for k, v in catalog["packages"].items() if v["organism"] == organism}
+
+
+def describe(ref):
+    return f"{ref.get('organism')} / {ref.get('assembly')} / {ref.get('annotation_release')} ({ref.get('source')})"
+
+
+# ------------------------------ acquisition ------------------------------
+
+def _gunzip_to(src, dest, log_file):
+    tmp = dest.with_name(dest.name + ".part")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    runner.run(["gzip", "-dc", src], stage="reference", stdout_file=tmp, log_file=log_file,
+               description=f"Decompressing {Path(src).name}")
+    if not runner.DRY_RUN:
+        os.replace(tmp, dest)
+
+
+def acquire(ref, paths, log_file):
+    """Download (catalog) or link (custom) genome + GTF into the store."""
+    for d in (paths.genome.parent, paths.gtf.parent, paths.checksums, paths.logs, paths.transcripts.parent):
+        d.mkdir(parents=True, exist_ok=True)
+    record = {}
+    if ref["kind"] == "catalog":
+        pkg = ref["package"]
+        for part, dest in (("genome", paths.genome), ("annotation", paths.gtf)):
+            url = pkg[part]["url"]
+            gz = paths.checksums.parent / "downloads" / Path(url).name
+            if dest.exists():
+                ui.skipped(f"{part}: already prepared ({dest})")
+                record[part] = {"url": url, "path": str(dest)}
+                continue
+            exp = expected_checksum(pkg, part, Path(url).name)
+            net.download(url, gz, stage="reference", log_file=log_file)
+            if not runner.DRY_RUN:
+                ok = verify_checksum(gz, exp)
+                if ok is False:
+                    bad = gz.with_name(gz.name + ".badchecksum")
+                    os.replace(gz, bad)
+                    raise PipelineError(f"{part} download failed checksum verification", stage="reference",
+                                        cause=f"file kept as {bad}", remedy="re-run reference preparation")
+                (paths.checksums / f"{part}.checksum.txt").write_text(
+                    f"file: {gz.name}\nprovider_checksum: {exp}\nverified: {ok}\nsha256: {net_sha256(gz)}\n")
+                ui.ok(f"{part} checksum " + ("verified against provider" if ok else "not published; SHA-256 recorded"))
+            _gunzip_to(gz, dest, log_file)
+            record[part] = {"url": url, "path": str(dest), "checksum": str(exp)}
+        if pkg.get("transcripts"):
+            record["transcripts"] = {"url": pkg["transcripts"]["url"], "downloaded": False,
+                                     "note": "optional; not required for HISAT2/featureCounts in v1"}
+    else:
+        for part, src, dest in (("genome", ref["fasta"], paths.genome), ("annotation", ref["gtf"], paths.gtf)):
+            src = Path(src)
+            if dest.exists() or dest.is_symlink():
+                record[part] = {"path": str(dest), "source_file": str(src)}
+                continue
+            if src.name.endswith(".gz"):
+                _gunzip_to(src, dest, log_file)
+            else:
+                dest.symlink_to(src.resolve())
+            record[part] = {"path": str(dest), "source_file": str(src)}
+            if not runner.DRY_RUN:
+                (paths.checksums / f"{part}.checksum.txt").write_text(f"sha256: {net_sha256(src)}\n")
+        if ref.get("external_index") and not index_files(paths.index_prefix):
+            paths.index_dir.mkdir(parents=True, exist_ok=True)
+            for f in index_files(ref["external_index"]) or []:
+                suffix = f.name[len(Path(ref["external_index"]).name):]
+                (paths.index_dir / f"genome{suffix}").symlink_to(f.resolve())
+            record["index"] = {"external_prefix": ref["external_index"]}
+    return record
+
+
+def net_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ------------------------------ preparation ------------------------------
+
+def index_files(prefix):
+    prefix = Path(prefix)
+    small = [prefix.parent / f"{prefix.name}.{i}.ht2" for i in range(1, 9)]
+    large = [prefix.parent / f"{prefix.name}.{i}.ht2l" for i in range(1, 9)]
+    if all(p.exists() for p in small):
+        return small
+    if all(p.exists() for p in large):
+        return large
+    return None
+
+
+def index_valid(prefix, fasta_names):
+    files = index_files(prefix)
+    if not files or any(f.stat().st_size == 0 for f in files):
+        return False, "index files missing or empty"
+    out = runner.tool_output(["hisat2-inspect", "-n", str(prefix)], timeout=600)
+    if out is None:
+        return False, "hisat2-inspect failed"
+    names = {l.split()[0] for l in out.splitlines() if l.strip()}
+    if fasta_names is not None and names != set(fasta_names):
+        return False, f"index sequences ({len(names)}) differ from genome FASTA ({len(fasta_names)})"
+    return True, f"{len(names)} sequences"
+
+
+def build_index(paths, fa_info, threads, mem_gb, use_ss, log_file, extra_args=()):
+    """Build HISAT2 index into a temp dir, validate, then move into place."""
+    runner.run(["hisat2_extract_splice_sites.py", paths.gtf], stage="reference", stdout_file=paths.splice_sites,
+               log_file=log_file, description="Extracting known splice sites from GTF")
+    runner.run(["hisat2_extract_exons.py", paths.gtf], stage="reference", stdout_file=paths.exons,
+               log_file=log_file, description="Extracting exons from GTF")
+    if not runner.DRY_RUN and paths.splice_sites.stat().st_size == 0:
+        ui.warn("no splice sites extracted (single-exon annotation?)")
+    tmp = paths.index_dir.with_name("index.building")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    cmd = ["hisat2-build", "-p", str(threads)]
+    if use_ss:
+        cmd += ["--ss", paths.splice_sites, "--exon", paths.exons]
+    cmd += [str(x) for x in extra_args]
+    cmd += [paths.genome, tmp / "genome"]
+    runner.run(cmd, stage="reference", log_file=log_file,
+               description="Building HISAT2 index (this can take a long time for large genomes)")
+    if runner.DRY_RUN:
+        return
+    ok, why = index_valid(tmp / "genome", fa_info["names"])
+    if not ok:
+        raise PipelineError(f"built HISAT2 index failed validation: {why}", stage="reference",
+                            remedy=f"see {log_file}; check RAM/disk")
+    if paths.index_dir.exists():
+        old = paths.index_dir.with_name(f"index.old.{datetime.now():%Y%m%d%H%M%S}")
+        os.replace(paths.index_dir, old)
+        ui.info(f"previous index moved aside to {old}")
+    os.replace(tmp, paths.index_dir)
+
+
+def index_ram_needed_gb(genome_bp, use_ss):
+    return genome_bp * (60 if use_ss else 2.8) / 1e9 + 0.5
+
+
+def gtf_to_bed12(gtf, bed):
+    """Convert GTF transcripts to BED12 (for RSeQC infer_experiment)."""
+    tx = {}
+    with open(gtf, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            c = line.rstrip("\n").split("\t")
+            if len(c) != 9 or c[2] != "exon":
+                continue
+            m = re.search(r'transcript_id "([^"]+)"', c[8])
+            if not m:
+                continue
+            t = tx.setdefault(m.group(1), [c[0], c[6], []])
+            t[2].append((int(c[3]) - 1, int(c[4])))
+    tmp = Path(str(bed) + ".part")
+    with open(tmp, "w") as out:
+        for tid, (chrom, strand, ex) in tx.items():
+            ex.sort()
+            start, end = ex[0][0], max(e for _, e in ex)
+            sizes = ",".join(str(e - s) for s, e in ex)
+            starts = ",".join(str(s - start) for s, _ in ex)
+            out.write(f"{chrom}\t{start}\t{end}\t{tid}\t0\t{strand if strand in '+-' else '+'}\t{start}\t{end}"
+                      f"\t0\t{len(ex)}\t{sizes},\t{starts},\n")
+    os.replace(tmp, bed)
+    return len(tx)
+
+
+def write_manifest(path, data):
+    C.save_yaml(data, path)
+
+
+def link_into_project(project, paths):
+    """Symlink store files into <project>/reference so the project is self-describing (no copies)."""
+    pairs = [(paths.genome, project.path("reference", "genome", "genome.fa")),
+             (paths.gtf, project.path("reference", "annotation", "annotation.gtf")),
+             (paths.splice_sites, project.path("reference", "annotation", "splice_sites.txt")),
+             (paths.exons, project.path("reference", "annotation", "exons.txt")),
+             (paths.bed12, project.path("reference", "annotation", "annotation.bed12"))]
+    for f in index_files(paths.index_prefix) or []:
+        pairs.append((f, project.path("reference", "index", f.name)))
+    for src, dst in pairs:
+        if not Path(src).exists():
+            continue
+        if dst.is_symlink() or dst.exists():
+            if dst.resolve() == Path(src).resolve():
+                continue
+            if not dst.is_symlink():
+                raise PipelineError(f"{dst} is a real file, not a link; refusing to replace it",
+                                    remedy="move it aside manually if it is no longer needed")
+            dst.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.symlink_to(Path(src).resolve())

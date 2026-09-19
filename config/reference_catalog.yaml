@@ -1,0 +1,185 @@
+# =====================================================================
+# Reference catalog. Each package pairs a genome FASTA with an annotation
+# GTF of the SAME assembly from the SAME provider, so combinations here are
+# compatible by construction. Add organisms/releases by adding entries.
+#
+# checksum.type: md5      -> file lists "<md5>  <filename>" (GENCODE, UCSC, NCBI)
+#                bsd_sum  -> Ensembl CHECKSUMS ("<sum> <blocks> <filename>")
+# approx sizes are shown to the user before any download.
+# =====================================================================
+
+organisms:
+  human:
+    scientific_name: Homo sapiens
+    taxon_id: 9606
+    bioc_orgdb: org.Hs.eg.db
+  mouse:
+    scientific_name: Mus musculus
+    taxon_id: 10090
+    bioc_orgdb: org.Mm.eg.db
+  yeast:
+    scientific_name: Saccharomyces cerevisiae
+    taxon_id: 4932
+    bioc_orgdb: org.Sc.sgd.db
+
+packages:
+  # ------------------------------- HUMAN -------------------------------
+  human_gencode_46:
+    organism: human
+    source: gencode
+    assembly: GRCh38
+    annotation_release: GENCODE 46
+    chromosome_style: chr
+    genome:
+      url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/GRCh38.primary_assembly.genome.fa.gz
+      approx_size_gb: 0.85
+    annotation:
+      url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.primary_assembly.annotation.gtf.gz
+      approx_size_gb: 0.05
+    transcripts:
+      url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.transcripts.fa.gz
+      approx_size_gb: 0.08
+    checksum: {type: md5, url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/MD5SUMS}
+    index_approx_size_gb: 4.5
+    genome_size_bp: 3100000000
+
+  human_ensembl_112:
+    organism: human
+    source: ensembl
+    assembly: GRCh38
+    annotation_release: Ensembl 112
+    chromosome_style: plain
+    genome:
+      url: https://ftp.ensembl.org/pub/release-112/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+      approx_size_gb: 0.85
+      checksum_url: https://ftp.ensembl.org/pub/release-112/fasta/homo_sapiens/dna/CHECKSUMS
+    annotation:
+      url: https://ftp.ensembl.org/pub/release-112/gtf/homo_sapiens/Homo_sapiens.GRCh38.112.gtf.gz
+      approx_size_gb: 0.05
+      checksum_url: https://ftp.ensembl.org/pub/release-112/gtf/homo_sapiens/CHECKSUMS
+    checksum: {type: bsd_sum}
+    index_approx_size_gb: 4.5
+    genome_size_bp: 3100000000
+
+  human_ucsc_hg38_refseq:
+    organism: human
+    source: ucsc
+    assembly: GRCh38
+    annotation_release: UCSC hg38 ncbiRefSeq (current at download)
+    chromosome_style: chr
+    genome:
+      url: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
+      approx_size_gb: 0.95
+      checksum_url: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/md5sum.txt
+    annotation:
+      url: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/genes/hg38.ncbiRefSeq.gtf.gz
+      approx_size_gb: 0.03
+    checksum: {type: md5}
+    index_approx_size_gb: 4.8
+    genome_size_bp: 3200000000
+
+  human_refseq_p14:
+    organism: human
+    source: refseq
+    assembly: GRCh38
+    annotation_release: NCBI RefSeq GCF_000001405.40 (GRCh38.p14)
+    chromosome_style: refseq_accession
+    genome:
+      url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+      approx_size_gb: 0.97
+    annotation:
+      url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.gtf.gz
+      approx_size_gb: 0.06
+    checksum: {type: md5, url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/md5checksums.txt}
+    index_approx_size_gb: 5.0
+    genome_size_bp: 3300000000
+
+  # ------------------------------- MOUSE -------------------------------
+  mouse_gencode_M35:
+    organism: mouse
+    source: gencode
+    assembly: GRCm39
+    annotation_release: GENCODE M35
+    chromosome_style: chr
+    genome:
+      url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M35/GRCm39.primary_assembly.genome.fa.gz
+      approx_size_gb: 0.8
+    annotation:
+      url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M35/gencode.vM35.primary_assembly.annotation.gtf.gz
+      approx_size_gb: 0.04
+    transcripts:
+      url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M35/gencode.vM35.transcripts.fa.gz
+      approx_size_gb: 0.06
+    checksum: {type: md5, url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M35/MD5SUMS}
+    index_approx_size_gb: 4.0
+    genome_size_bp: 2700000000
+
+  mouse_ensembl_112:
+    organism: mouse
+    source: ensembl
+    assembly: GRCm39
+    annotation_release: Ensembl 112
+    chromosome_style: plain
+    genome:
+      url: https://ftp.ensembl.org/pub/release-112/fasta/mus_musculus/dna/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz
+      approx_size_gb: 0.8
+      checksum_url: https://ftp.ensembl.org/pub/release-112/fasta/mus_musculus/dna/CHECKSUMS
+    annotation:
+      url: https://ftp.ensembl.org/pub/release-112/gtf/mus_musculus/Mus_musculus.GRCm39.112.gtf.gz
+      approx_size_gb: 0.04
+      checksum_url: https://ftp.ensembl.org/pub/release-112/gtf/mus_musculus/CHECKSUMS
+    checksum: {type: bsd_sum}
+    index_approx_size_gb: 4.0
+    genome_size_bp: 2700000000
+
+  mouse_ucsc_mm39_refseq:
+    organism: mouse
+    source: ucsc
+    assembly: GRCm39
+    annotation_release: UCSC mm39 ncbiRefSeq (current at download)
+    chromosome_style: chr
+    genome:
+      url: https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/mm39.fa.gz
+      approx_size_gb: 0.85
+      checksum_url: https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/md5sum.txt
+    annotation:
+      url: https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/genes/mm39.ncbiRefSeq.gtf.gz
+      approx_size_gb: 0.03
+    checksum: {type: md5}
+    index_approx_size_gb: 4.2
+    genome_size_bp: 2700000000
+
+  # ------------------------------- YEAST (small; good for testing) -------
+  yeast_ensembl_112:
+    organism: yeast
+    source: ensembl
+    assembly: R64-1-1
+    annotation_release: Ensembl 112
+    chromosome_style: roman
+    genome:
+      url: https://ftp.ensembl.org/pub/release-112/fasta/saccharomyces_cerevisiae/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz
+      approx_size_gb: 0.004
+      checksum_url: https://ftp.ensembl.org/pub/release-112/fasta/saccharomyces_cerevisiae/dna/CHECKSUMS
+    annotation:
+      url: https://ftp.ensembl.org/pub/release-112/gtf/saccharomyces_cerevisiae/Saccharomyces_cerevisiae.R64-1-1.112.gtf.gz
+      approx_size_gb: 0.001
+      checksum_url: https://ftp.ensembl.org/pub/release-112/gtf/saccharomyces_cerevisiae/CHECKSUMS
+    checksum: {type: bsd_sum}
+    index_approx_size_gb: 0.02
+    genome_size_bp: 12100000
+
+# Optional auxiliary resources (never downloaded automatically).
+# These are R/Bioconductor packages installed into the R env on request.
+optional_resources:
+  gene_id_annotation:
+    description: Gene symbol / Entrez / description mapping (Bioconductor OrgDb for the organism)
+    r_packages_from_organism: bioc_orgdb
+    approx_size_gb: 0.1
+  go:
+    description: GO over-representation analysis (clusterProfiler + OrgDb)
+    r_packages: [clusterProfiler]
+    approx_size_gb: 0.3
+  reactome:
+    description: Reactome pathway over-representation (ReactomePA; human/mouse only)
+    r_packages: [ReactomePA]
+    approx_size_gb: 0.2

@@ -1,0 +1,142 @@
+# =====================================================================
+# Bulk RNA-seq Pipeline v1 — default configuration
+# ---------------------------------------------------------------------
+# Every scientific parameter used by the pipeline is listed here.
+# A project gets its own copy at <project>/config/project_config.yaml;
+# edit that copy (or use menu 7 "Pipeline Configuration"), not this file.
+# Each run saves the exact final configuration to
+# <project>/config/config_used_<timestamp>.yaml.
+# =====================================================================
+
+# ---------------- Resources ----------------
+threads: auto               # "auto" = all detected CPU cores minus one, or an integer
+max_memory_gb: auto         # "auto" = 80% of detected RAM, or a number
+
+# ---------------- Environments ----------------
+environment:
+  conda_root: ~/miniforge3
+  tools_env: rnaseq-tools   # conda env holding FastQC, HISAT2, samtools, ...
+  r_env: rnaseq-r           # conda env holding R + DESeq2
+  use_path_fallback: true   # if a tool is not in the env, look on $PATH
+
+# ---------------- Input data ----------------
+read_type: auto             # auto | paired | single  (auto = detect, then confirm; otherwise the data must match)
+import_mode: symlink        # symlink | copy   (local FASTQ import; symlink avoids duplication)
+download:
+  source_preference: ena    # ena | sra   (ENA gives direct FASTQ + MD5; SRA uses prefetch/fasterq-dump)
+  max_reads: 0              # 0 = full data. >0 = keep only first N reads/pairs (PILOT/TEST ONLY — recorded in manifest)
+  retries: 3
+
+# ---------------- FASTQ validation ----------------
+fastq_validation:
+  workers: auto             # parallel files validated at once
+  allowed_bases: "ACGTNacgtn."
+  quality_offset: 33        # Phred+33 (Sanger/Illumina 1.8+)
+
+# ---------------- Quality gate thresholds ----------------
+# Thresholds used to *recommend* trimming. They are advisory: the user
+# always makes the final decision. Values follow common practice
+# (FastQC defaults / MultiQC conventions); see docs/PIPELINE_METHODS.md.
+quality_gate:
+  adapter_max_percent_trim: 5.0     # max adapter content at any position (%) above which trimming is recommended
+  adapter_max_percent_review: 1.0   # between review and trim = REVIEW
+  tail_mean_quality_trim: 20        # mean quality over last 10% of positions below this -> trimming recommended
+  tail_mean_quality_review: 28
+  per_base_lower_quartile_min: 10   # any position lower quartile below this -> REVIEW
+  overrepresented_max_percent: 1.0  # max single overrepresented sequence (%) -> REVIEW (RNA-seq often has some)
+  n_content_max_percent: 5.0        # max N at any position (%) -> REVIEW
+  duplication_review_percent: 80.0  # % duplicated reads; high duplication is normal for highly expressed genes -> REVIEW only
+  gc_deviation_review: 10.0         # |sample %GC - median %GC across samples| above this -> REVIEW
+  min_reads_review: 1000000         # samples below this read count -> REVIEW
+
+# ---------------- Trimming (fastp) ----------------
+trim_adapters: ask          # ask | always | never
+fastp_parameters:
+  detect_adapter_for_pe: true
+  qualified_quality_phred: 20
+  unqualified_percent_limit: 40
+  cut_right: true
+  cut_right_window_size: 4
+  cut_right_mean_quality: 20
+  length_required: 25
+  extra_args: []            # list of additional fastp arguments
+
+# ---------------- Reference ----------------
+reference_source: ask       # ask | gencode | ensembl | refseq | ucsc | custom | existing  (preselected in the menu)
+organism: ask               # ask | human | mouse | yeast | custom  (preselected in the menu)
+genome_assembly: ask        # informational default for custom references
+annotation_release: ask     # informational default for custom references
+reference_store: ~/rnaseq_references   # shared across projects (avoids duplicate genome copies)
+hisat2_build:
+  use_splice_sites_in_index: auto  # auto = only if RAM allows (~60 bytes per genome bp); else sites given at alignment
+  extra_args: []
+
+# ---------------- Alignment (HISAT2) ----------------
+hisat2_parameters:
+  dta: true                 # --dta: report alignments tailored for StringTie transcript assembly
+  use_known_splice_sites: true
+  no_mixed: false
+  no_discordant: false
+  extra_args: []
+samtools_sort_memory_per_thread: auto   # e.g. "768M"; auto = derived from max_memory_gb
+min_overall_alignment_rate_warn: 70.0   # % ; below -> WARNING
+min_overall_alignment_rate_fail: 20.0   # % ; below -> sample marked FAILED (likely wrong reference)
+
+# ---------------- Strandedness ----------------
+strandedness: auto          # auto | unstranded | forward | reverse   (auto = infer with RSeQC, confirm with user)
+strandedness_inference:
+  sample_reads: 200000
+  stranded_min_fraction: 0.80     # fraction of reads explained by one orientation to call stranded
+  unstranded_max_diff: 0.10       # |fraction1 - fraction2| below this -> unstranded
+  max_undetermined_fraction: 0.50 # above this -> cannot infer (ask the user)
+
+# ---------------- StringTie2 ----------------
+stringtie_parameters:
+  reference_guided_only: true   # -e : quantify only reference transcripts (no novel assembly)
+  ballgown_tables: false        # -B
+  extra_args: []
+
+# ---------------- featureCounts ----------------
+featurecounts_parameters:
+  feature_type: exon            # -t
+  attribute: gene_id            # -g
+  count_multimapping: false     # -M
+  fractional: false             # --fraction
+  primary_only: false           # --primary
+  min_mapping_quality: 0        # -Q
+  require_both_ends_mapped: true  # -B (paired-end only)
+  count_chimeric: false         # if false -> -C (paired-end only)
+  extra_args: []
+
+# ---------------- Experimental design / DESeq2 ----------------
+design_formula: "~ condition"
+reference_level: ask            # level of the variable of interest used as baseline
+alpha: 0.05                     # adjusted p-value (BH) threshold
+log2fc_threshold: 1.0           # |log2FC| threshold for up/down calls
+lfc_test_threshold: 0           # lfcThreshold passed to DESeq2 results() (0 = standard Wald test)
+min_count_filter:
+  min_count: 10                 # keep genes with >= min_count reads ...
+  min_samples: smallest_group   # ... in >= this many samples ("smallest_group" or integer)
+independent_filtering: true
+cooks_cutoff: true
+lfc_shrinkage: apeglm           # apeglm | normal | none  (for MA plot / ranking; tests use unshrunken LFC)
+top_n_genes: 50                 # top up/down tables and top-gene heatmap
+heatmap_max_genes: 500          # cap for significant-gene heatmap (most significant first)
+transformation: vst             # vst | rlog for PCA/heatmaps
+plot_formats: [png, pdf]
+plot_dpi: 300
+
+# ---------------- Optional downstream annotation ----------------
+annotation:
+  enabled: false                # GO / Reactome enrichment (requires extra R packages + internet)
+  go: false
+  reactome: false
+
+# ---------------- Storage ----------------
+storage:
+  min_free_gb_warn: 50
+  borderline_factor: 1.5        # ask permission if free < estimate * factor
+  cleanup_intermediates: ask    # ask | never
+
+# ---------------- Interface ----------------
+verbose: false

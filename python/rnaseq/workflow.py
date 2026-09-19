@@ -1,0 +1,1174 @@
+"""Pipeline state machine: stage definitions, per-stage screens, checkpoints, resume.
+
+Each stage follows START -> VALIDATION (inputs) -> EXECUTION -> POST-VALIDATION -> SUCCESS/FAILURE.
+A checkpoint is written only after post-validation succeeds.
+"""
+import json
+import os
+from pathlib import Path
+
+from . import (PipelineError, UserAbort, alignment, bam_manager, count_matrix, data_manager, design,
+               ena_manager, fastq_validator, featurecounts, qc_manager, quality_assessment, r_bridge,
+               reference_manager, runner, sra_manager, storage, strandedness, stringtie, trimming, ui)
+from . import config as C
+from .checkpoint import Checkpoints
+
+
+class Context:
+    def __init__(self, project, cfg, envs, sysinfo, dry_run=False, auto=False):
+        self.project = project
+        self.cfg = cfg
+        self.envs = envs
+        self.sysinfo = sysinfo
+        self.dry_run = dry_run
+        self.auto = auto
+        self.cp = Checkpoints(project)
+        self.threads = C.resolve_threads(cfg, sysinfo["cpu_cores"])
+        self.mem_gb = C.resolve_memory_gb(cfg, sysinfo["ram_total_gb"])
+
+    def log(self, stage, sample=None):
+        d = self.project.path("logs", stage)
+        d.mkdir(parents=True, exist_ok=True)
+        return d / (f"{sample}.log" if sample else f"{stage}.log")
+
+    @property
+    def samples(self):
+        return self.project.active_samples()
+
+    def ref(self):
+        r = self.project.state.get("reference")
+        if not r:
+            raise PipelineError("no reference selected", remedy="use 'Manage Reference Databases' first")
+        return r
+
+
+# ============================================================================ helpers
+
+def _fail_samples(ctx, stage, failures):
+    """Report per-sample failures; ask whether to continue without them."""
+    if not failures:
+        return
+    ui.section(f"{len(failures)} SAMPLE(S) FAILED IN {stage.upper()}")
+    for sid, why in failures.items():
+        print(f"  {sid}: {why}")
+    remaining = [s for s in ctx.samples if s not in failures]
+    for sid, why in failures.items():
+        ctx.project.mark_failed(sid, why, stage)
+    if len(remaining) < 2 or ctx.dry_run:
+        raise PipelineError(f"{stage}: too few valid samples remain ({len(remaining)})", stage=stage)
+    if not ui.ask_yes_no(f"Continue with the remaining {len(remaining)} sample(s)? (failed samples are "
+                         "excluded from all downstream steps; their files are kept)", default=False):
+        raise PipelineError(f"{stage}: stopped by user after sample failures", stage=stage,
+                            remedy="fix the failed samples, use 'Samples' menu to re-include them, and resume")
+
+
+def _validation_cache(ctx):
+    p = ctx.project.path("data", "metadata", "fastq_validation_cache.json")
+    try:
+        return p, json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return p, {}
+
+
+def _file_key(path):
+    st = Path(path).stat()
+    return f"{Path(path).resolve()}|{st.st_size}|{st.st_mtime_ns}"
+
+
+def validate_fastqs(ctx, pairs, report_path, stage, expected=None):
+    """pairs: {sid: (r1, r2)}. Streams every file; uses a cache keyed by path/size/mtime to avoid
+    re-reading unchanged files after an interruption. Returns rows; raises nothing (caller decides)."""
+    cache_path, cache = _validation_cache(ctx)
+    fv = ctx.cfg["fastq_validation"]
+    jobs, rows_by = [], {}
+    for sid, (r1, r2) in pairs.items():
+        key = "|".join(_file_key(p) for p in (r1, r2) if p and Path(p).exists())
+        if key and key in cache and all(r["status"] != "FAILED" for r in cache[key]):
+            rows_by[sid] = cache[key]
+            continue
+        jobs.append((sid, str(r1), str(r2) if r2 else None, fv["allowed_bases"], fv["quality_offset"]))
+    if pairs and len(jobs) < len(pairs):
+        ui.skipped(f"{len(pairs) - len(jobs)} sample(s) unchanged since a previous successful validation")
+    workers = fv.get("workers", "auto")
+    workers = min(len(jobs), max(1, ctx.threads // 2)) if workers == "auto" else int(workers)
+    if jobs and not ctx.dry_run:
+        ui.running(f"Validating {sum(2 if j[2] else 1 for j in jobs)} FASTQ file(s) with {max(1, workers)} worker(s) "
+                   "(streaming; full read of every file)")
+
+        def progress(sid, rows):
+            st = "FAILED" if any(r["status"] == "FAILED" for r in rows) else "OK"
+            reads = rows[0].get("reads", 0)
+            (ui.ok if st == "OK" else ui.failed)(f"{sid}: {reads:,} reads" + ("" if st == "OK" else
+                                                  f" — {rows[0]['problem'] or rows[-1]['problem']}"))
+
+        for rows in [fastq_validator.validate_many(jobs, workers=max(1, workers), progress=progress)]:
+            for r in rows:
+                rows_by.setdefault(r["sample"], []).append(r)
+        for sid, (r1, r2) in pairs.items():
+            if sid in rows_by and all(r["status"] != "FAILED" for r in rows_by[sid]):
+                key = "|".join(_file_key(p) for p in (r1, r2) if p)
+                cache[key] = rows_by[sid]
+        cache_path.write_text(json.dumps(cache, indent=1))
+    elif jobs:
+        ui.status("DRY-RUN", f"would stream-validate {len(jobs)} sample(s)")
+        return []
+    rows = [r for sid in pairs for r in rows_by.get(sid, [])]
+    if expected:
+        for r in rows:
+            exp = expected.get(r["sample"])
+            if r["status"] != "FAILED" and exp is not None and r.get("reads") != exp:
+                r.update(status="FAILED", problem="read count mismatch",
+                         reason=f"{r['reads']} reads, expected {exp} (from fastp report)",
+                         recommended_action="re-run trimming")
+    fastq_validator.write_report(rows, report_path)
+    return rows
+
+
+def _failures_from_rows(rows):
+    out = {}
+    for r in rows:
+        if r["status"] == "FAILED" and r["sample"] not in out:
+            out[r["sample"]] = f"{r['problem']} in {Path(r['file']).name} (record {r['record']}): {r['reason']}. " \
+                               f"Action: {r['recommended_action']}"
+    return out
+
+
+def _print_validation_failure(rows):
+    for r in rows:
+        if r["status"] == "FAILED" and r["problem"] != "mate failed":
+            print()
+            ui.kv([("STATUS", "FAILED"), ("Sample", r["sample"]), ("File", r["file"]),
+                   ("Problem", r["problem"]), ("Record", r["record"]), ("Reason", r["reason"]),
+                   ("Recommended action", r["recommended_action"])], indent=2)
+
+
+# ============================================================================ stages
+
+class Stage:
+    key = ""
+    title = ""
+    depends = ()
+    expensive = False
+    settings = ()
+
+    def overview(self, ctx):
+        return []
+
+    def check_inputs(self, ctx):
+        return []
+
+    def estimate_gb(self, ctx):
+        return 0.0
+
+    def execute(self, ctx):
+        raise NotImplementedError
+
+    def revalidate(self, ctx, data):
+        return []
+
+
+class DataStage(Stage):
+    key, title, expensive = "data_acquired", "DATA DOWNLOAD / IMPORT", True
+    settings = ("download.source_preference", "download.max_reads", "import_mode")
+
+    def overview(self, ctx):
+        src = ctx.project.state.get("data_source")
+        pending = [s for s in ctx.samples if not ctx.project.samples[s].get("r1")]
+        return [("Source", src), ("Samples", len(ctx.samples)), ("To download", len(pending)),
+                ("Read type", ctx.project.state.get("read_type")),
+                ("Pilot subset", f"first {ctx.cfg['download']['max_reads']:,} reads (TEST ONLY)"
+                 if ctx.cfg["download"]["max_reads"] else "no (full data)")]
+
+    def check_inputs(self, ctx):
+        if not ctx.samples:
+            return ["no samples defined — choose a data source first"]
+        want = ctx.cfg.get("read_type", "auto")
+        have = ctx.project.state.get("read_type")
+        if want != "auto" and have and want != have:
+            return [f"config read_type is '{want}' but the data are {have}-end; fix the config or the input"]
+        return []
+
+    def estimate_gb(self, ctx):
+        return storage.estimate(ctx.project, self.key, ctx.samples)
+
+    def execute(self, ctx):
+        p = ctx.project
+        max_reads = int(ctx.cfg["download"].get("max_reads") or 0)
+        failures = {}
+        for sid in ctx.samples:
+            rec = p.samples[sid]
+            if rec["source"] == "local":
+                continue
+            if rec.get("r1") and p.abs(rec["r1"]).exists():
+                continue
+            try:
+                if rec["source"] == "sra":
+                    r1, r2 = sra_manager.download_run(rec["accession"], p.path("data", "raw"), p.path("data", "fastq"),
+                                                      p.path("temp"), ctx.threads, rec["layout"] == "PAIRED",
+                                                      max_reads=max_reads, log_file=ctx.log("data", sid))
+                else:
+                    run = {"run_accession": rec["accession"], "library_layout": rec["layout"],
+                           "_files": [tuple(f) for f in rec["download"]["files"]]}
+                    r1, r2 = ena_manager.download_run(run, p.path("data", "fastq"), max_reads=max_reads,
+                                                      log_file=ctx.log("data", sid),
+                                                      retries=int(ctx.cfg["download"].get("retries", 3)))
+                if not ctx.dry_run:
+                    rec["r1"] = p.rel(r1)
+                    rec["r2"] = p.rel(r2) if r2 else None
+                    rec["pilot_max_reads"] = max_reads or None
+                    p.save()
+                    ui.ok(f"{sid}: downloaded")
+            except PipelineError as e:
+                failures[sid] = str(e) + (f" ({e.cause})" if e.cause else "")
+                ui.failed(f"{sid}: {e}")
+        if ctx.dry_run:
+            return [], {}, {}
+        _fail_samples(ctx, self.key, failures)
+        outs = []
+        for sid in ctx.samples:
+            outs += [x for x in p.fastqs(sid, trimmed=False) if x]
+        missing = [str(o) for o in outs if not Path(o).exists()]
+        if missing:
+            raise PipelineError(f"FASTQ files missing after import: {missing[:3]}", stage=self.key)
+        return outs, {"samples": ctx.samples, "max_reads": max_reads}, {"files": len(outs)}
+
+
+class FastqVerifyStage(Stage):
+    key, title, depends = "fastq_verified", "FASTQ VERIFICATION", ("data_acquired",)
+    settings = ("fastq_validation.workers", "fastq_validation.quality_offset", "fastq_validation.allowed_bases")
+
+    def overview(self, ctx):
+        return [("Samples", len(ctx.samples)), ("Read type", ctx.project.state.get("read_type")),
+                ("Checks", "4-line records, headers, alphabet, quality, lengths, gzip, mate IDs/counts")]
+
+    def execute(self, ctx):
+        p = ctx.project
+        pairs = {sid: p.fastqs(sid, trimmed=False) for sid in ctx.samples}
+        report = p.path("data", "metadata", "fastq_validation_report.tsv")
+        rows = validate_fastqs(ctx, pairs, report, self.key)
+        if ctx.dry_run:
+            return [], {}, {}
+        failures = _failures_from_rows(rows)
+        if failures:
+            _print_validation_failure(rows)
+            ui.error("Samples that fail FASTQ validation cannot be aligned.")
+        _fail_samples(ctx, self.key, failures)
+        warn = [r for r in rows if r["status"] == "WARNING"]
+        for r in warn:
+            ui.warn(f"{r['sample']} {r['mate']}: {r['problem']} — {r['recommended_action']}")
+        for r in rows:
+            if r["sample"] in ctx.samples:
+                p.samples[r["sample"]].setdefault("reads", {})[r["mate"]] = r["reads"]
+                p.samples[r["sample"]]["read_length"] = r["max_length"]
+        p.save()
+        ui.ok(f"FASTQ validation passed for {len(ctx.samples)} sample(s); report: {p.rel(report)}")
+        return [report], {"samples": ctx.samples}, {"files": len(rows)}
+
+
+class RawQCStage(Stage):
+    key, title, depends = "raw_qc_completed", "RAW READ QC (FastQC + MultiQC)", ("fastq_verified",)
+
+    def overview(self, ctx):
+        return [("Files", sum(2 if ctx.project.fastqs(s, trimmed=False)[1] else 1 for s in ctx.samples)),
+                ("Threads", ctx.threads)]
+
+    def execute(self, ctx):
+        return run_qc(ctx, self.key, trimmed=False)
+
+
+def run_qc(ctx, stage, trimmed):
+    p = ctx.project
+    sub = "trimmed" if trimmed else "raw"
+    files, expected = [], {}
+    for sid in ctx.samples:
+        r1, r2 = p.fastqs(sid, trimmed=trimmed)
+        for mate, f in (("R1", r1), ("R2", r2)):
+            if f:
+                files.append(f)
+                if trimmed:
+                    expected[str(f)] = p.samples[sid]["trimmed"].get("expected_reads_per_file")
+                else:
+                    expected[str(f)] = p.samples[sid].get("reads", {}).get(mate)
+    fq_dir, mq_dir = p.path("qc", f"fastqc_{sub}"), p.path("qc", f"multiqc_{sub}")
+    qc_manager.run_fastqc(files, fq_dir, p.path("temp"), ctx.threads, ctx.log(stage), stage)
+    if not ctx.dry_run:
+        qc_manager.validate_fastqc(files, fq_dir, expected, stage)
+    inputs = [fq_dir] + ([p.path("qc", "fastp")] if trimmed else [])
+    qc_manager.run_multiqc(inputs, mq_dir, f"{p.name}: {sub} reads", ctx.log(stage), stage)
+    if ctx.dry_run:
+        return [], {}, {}
+    return [fq_dir, mq_dir], {"samples": ctx.samples}, {"files": len(files)}
+
+
+def assess_quality(ctx, trimmed):
+    p = ctx.project
+    sub = "trimmed" if trimmed else "raw"
+    per = {}
+    for sid in ctx.samples:
+        r1, r2 = p.fastqs(sid, trimmed=trimmed)
+        per[sid] = {}
+        for mate, f in (("R1", r1), ("R2", r2)):
+            if f:
+                z = p.path("qc", f"fastqc_{sub}", qc_manager.fastqc_basename(f) + ".zip")
+                per[sid][mate] = quality_assessment.metrics_from_fastqc(z)
+    res = quality_assessment.assess(per, ctx.cfg["quality_gate"], p.is_paired())
+    out_dir = p.path("qc", "assessment", sub)
+    files = quality_assessment.write_outputs(res, out_dir, ctx.cfg["quality_gate"],
+                                             f"Quality assessment — {sub} reads")
+    return res, files
+
+
+def show_assessment(res):
+    ui.section("QUALITY ASSESSMENT")
+    ui.table([(s, r["status"]) for s, r in res.items()], ["Sample", "Status"])
+    reasons = {}
+    for s, r in res.items():
+        for x in r["reasons"]:
+            reasons.setdefault(x.split("] ", 1)[1].split(" (")[0].split(":")[-1].strip()[:70], []).append(s)
+    if reasons:
+        print("\nReasons:")
+        for s, r in res.items():
+            for x in r["reasons"]:
+                print(f"  {s}: {x}")
+    print("\nNote: FastQC warnings do not automatically mean data are unusable.")
+
+
+class QualityGateStage(Stage):
+    key, title, depends = "quality_assessed", "QUALITY ASSESSMENT / QUALITY GATE", ("raw_qc_completed",)
+    settings = ("trim_adapters", "quality_gate")
+
+    def execute(self, ctx):
+        if ctx.dry_run:
+            ui.status("DRY-RUN", "would parse FastQC results and apply thresholds from config quality_gate")
+            return [], {}, {}
+        res, files = assess_quality(ctx, trimmed=False)
+        show_assessment(res)
+        statuses = {r["status"] for r in res.values()}
+        fails = {s: "; ".join(r["reasons"]) for s, r in res.items() if r["status"] == "FAIL"}
+        if fails:
+            _fail_samples(ctx, self.key, fails)
+        recommend = "TRIMMING RECOMMENDED" in statuses
+        ui.action("fastp trimming recommended" if recommend else "no trimming needed by the configured thresholds")
+        mode = ctx.cfg.get("trim_adapters", "ask")
+        if mode == "always":
+            decision = "trim"
+            ui.info("config trim_adapters=always -> trimming will run")
+        elif mode == "never":
+            decision = "skip"
+            ui.info("config trim_adapters=never -> trimming skipped")
+        else:
+            c = ui.choose("DECISION", [f"Accept recommendation ({'run fastp' if recommend else 'skip trimming'})",
+                                       "Run fastp", "Skip trimming", "Stop pipeline"])
+            if c == 3:
+                raise UserAbort("stopped at quality gate")
+            decision = {0: "trim" if recommend else "skip", 1: "trim", 2: "skip"}[c]
+            if decision == "skip" and recommend:
+                ui.warn("continuing without trimming despite the recommendation (your decision is recorded)")
+        if "REVIEW" in statuses and decision == "skip":
+            if not ui.ask_yes_no("Some samples are flagged REVIEW (see reasons). Continue with them?", default=True):
+                raise UserAbort("stopped at quality gate (REVIEW samples)")
+        d = {"decision": decision, "recommended": "trim" if recommend else "skip",
+             "statuses": {s: r["status"] for s, r in res.items()}}
+        dp = ctx.project.path("qc", "assessment", "qc_decision.json")
+        dp.write_text(json.dumps(d, indent=2))
+        ctx.project.state["qc_decision"] = d
+        ctx.project.save()
+        return files + [dp], {"samples": ctx.samples, "decision": decision}, d
+
+
+class TrimmingStage(Stage):
+    key, title, depends, expensive = "trimming_completed", "CONDITIONAL TRIMMING (fastp) + POST-TRIM QC", \
+        ("quality_assessed",), True
+    settings = ("fastp_parameters",)
+
+    def overview(self, ctx):
+        d = (ctx.project.state.get("qc_decision") or {}).get("decision")
+        fp = ctx.cfg["fastp_parameters"]
+        return [("Decision", d), ("Samples", len(ctx.samples)), ("Threads", ctx.threads),
+                ("Parameters", f"Q{fp['qualified_quality_phred']}, cut_right={fp['cut_right']} "
+                               f"(w{fp['cut_right_window_size']}/Q{fp['cut_right_mean_quality']}), "
+                               f"min length {fp['length_required']}")]
+
+    def estimate_gb(self, ctx):
+        d = (ctx.project.state.get("qc_decision") or {}).get("decision")
+        return storage.estimate(ctx.project, self.key, ctx.samples) if d == "trim" else 0
+
+    def execute(self, ctx):
+        p = ctx.project
+        decision = (p.state.get("qc_decision") or {}).get("decision")
+        if decision != "trim" and not ctx.dry_run:
+            for sid in p.samples:
+                p.samples[sid].pop("trimmed", None)
+            p.save()
+            ui.skipped("trimming not requested at the quality gate; raw reads will be aligned")
+            dp = p.path("qc", "assessment", "qc_decision.json")
+            return [dp], {"samples": ctx.samples, "trimmed": False}, {"trimmed": False}
+        failures = {}
+        for sid in ctx.samples:
+            try:
+                trimming.trim_sample(p, sid, ctx.cfg["fastp_parameters"], ctx.threads, ctx.log("trimming", sid))
+            except PipelineError as e:
+                failures[sid] = str(e)
+        if ctx.dry_run:
+            return [], {}, {}
+        _fail_samples(ctx, self.key, failures)
+        ui.running("Validating trimmed FASTQ files")
+        pairs = {sid: p.fastqs(sid, trimmed=True) for sid in ctx.samples}
+        expected = {sid: p.samples[sid]["trimmed"]["expected_reads_per_file"] for sid in ctx.samples}
+        rows = validate_fastqs(ctx, pairs, p.path("data", "metadata", "fastq_validation_trimmed.tsv"),
+                               self.key, expected)
+        bad = _failures_from_rows(rows)
+        if bad:
+            _print_validation_failure(rows)
+            raise PipelineError("trimming produced invalid FASTQ — pipeline stopped", stage=self.key,
+                                remedy="inspect fastp logs; do not align these files")
+        outs, _, _ = run_qc(ctx, self.key, trimmed=True)
+        res, files = assess_quality(ctx, trimmed=True)
+        ui.section("POST-TRIMMING ASSESSMENT")
+        ui.table([(s, r["status"], f"{p.samples[s]['trimmed']['reads_after']:,} / "
+                   f"{p.samples[s]['trimmed']['reads_before']:,}") for s, r in res.items()],
+                 ["Sample", "Status", "Reads kept / before"])
+        trimmed_files = [x for sid in ctx.samples for x in p.fastqs(sid, trimmed=True) if x]
+        return trimmed_files + outs + files + [p.path("qc", "fastp")], {"samples": ctx.samples, "trimmed": True,
+                                                                          "fastp": ctx.cfg["fastp_parameters"]}, \
+            {"trimmed": True}
+
+
+class ReferenceStage(Stage):
+    key, title, expensive = "reference_ready", "REFERENCE PREPARATION", True
+    settings = ("hisat2_build.use_splice_sites_in_index", "reference_store")
+
+    def overview(self, ctx):
+        r = ctx.project.state.get("reference") or {}
+        return [("Reference", r.get("label", "(not selected)")), ("Store", r.get("store")),
+                ("Threads", ctx.threads), ("RAM", f"{ctx.sysinfo['ram_total_gb']} GB")]
+
+    def check_inputs(self, ctx):
+        return [] if ctx.project.state.get("reference") else ["no reference selected (main menu 5)"]
+
+    def estimate_gb(self, ctx):
+        r = ctx.project.state.get("reference") or {}
+        if Path(r.get("store", "/nonexistent")).joinpath("index").is_dir():
+            return 0
+        return storage.estimate(ctx.project, self.key, [], r.get("package"))
+
+    def execute(self, ctx):
+        r = ctx.ref()
+        paths = reference_manager.RefPaths(r["store"])
+        log = ctx.log("reference")
+        record = reference_manager.acquire(r, paths, log)
+        if ctx.dry_run:
+            use_ss = False
+            reference_manager.build_index(paths, {"names": []}, ctx.threads, ctx.mem_gb, use_ss, log)
+            return [], {}, {}
+        ui.running("Validating genome FASTA (streaming)")
+        fa = reference_manager.validate_fasta(paths.genome)
+        ui.ok(f"FASTA valid: {fa['n_sequences']} sequences, {fa['total_bp']:,} bp")
+        ui.running("Validating GTF")
+        gtf = reference_manager.validate_gtf(paths.gtf, ctx.cfg["featurecounts_parameters"]["attribute"])
+        ui.ok(f"GTF valid: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} exons")
+        errors, warns = reference_manager.check_compatibility(fa, gtf, r.get("assembly"),
+                                                              r.get("annotation_assembly", r.get("assembly")))
+        for w in warns:
+            ui.warn(w)
+        if errors:
+            for e in errors:
+                ui.error(e)
+            if not r.get("override_compatibility"):
+                raise PipelineError("genome and annotation are not compatible", stage=self.key,
+                                    remedy="select a matching genome/annotation pair (same assembly and provider)")
+            ui.warn("compatibility errors OVERRIDDEN by user (recorded in manifest)")
+        ui.ok("genome/annotation compatibility checks passed")
+        runner.run(["samtools", "faidx", paths.genome], stage=self.key, log_file=log, description="Indexing FASTA")
+        n_tx = reference_manager.gtf_to_bed12(paths.gtf, paths.bed12)
+        ui.ok(f"BED12 written for strandedness inference ({n_tx:,} transcripts)")
+        setting = ctx.cfg["hisat2_build"]["use_splice_sites_in_index"]
+        need_ss = reference_manager.index_ram_needed_gb(fa["total_bp"], True)
+        use_ss = (need_ss <= ctx.sysinfo["ram_available_gb"] * 0.9) if setting == "auto" else bool(setting)
+        ok, why = reference_manager.index_valid(paths.index_prefix, fa["names"])
+        manifest_prev = C.load_yaml(paths.manifest) if paths.manifest.exists() else {}
+        if ok and paths.splice_sites.exists():
+            use_ss = bool(manifest_prev.get("index", {}).get("splice_sites_in_index", False))
+            ui.skipped(f"existing HISAT2 index is valid ({why}); not rebuilding")
+        else:
+            need = reference_manager.index_ram_needed_gb(fa["total_bp"], use_ss)
+            ui.info(f"HISAT2 index build: splice sites in index = {use_ss} (est. RAM {need:.1f} GB; "
+                    f"available {ctx.sysinfo['ram_available_gb']} GB)")
+            if not use_ss:
+                ui.info("known splice sites will be supplied at alignment time (--known-splicesite-infile)")
+            if need > ctx.sysinfo["ram_available_gb"]:
+                ui.warn("estimated RAM exceeds available memory; the build may fail or swap heavily")
+                if not ui.ask_yes_no("Attempt the index build anyway?", default=False):
+                    raise UserAbort("index build cancelled")
+            reference_manager.build_index(paths, fa, ctx.threads, ctx.mem_gb, use_ss, log,
+                                          ctx.cfg["hisat2_build"].get("extra_args", []))
+            ok, why = reference_manager.index_valid(paths.index_prefix, fa["names"])
+            if not ok:
+                raise PipelineError(f"HISAT2 index invalid after build: {why}", stage=self.key)
+            ui.ok(f"HISAT2 index built and validated ({why})")
+        manifest = {
+            "organism": r.get("organism"), "source": r.get("source"), "genome_assembly": r.get("assembly"),
+            "annotation_assembly": r.get("annotation_assembly", r.get("assembly")),
+            "annotation_release": r.get("annotation_release"), "label": r.get("label"),
+            "files": record, "genome": {"path": str(paths.genome), "sequences": fa["n_sequences"],
+                                        "total_bp": fa["total_bp"]},
+            "annotation": {"path": str(paths.gtf), "genes": gtf["genes"], "transcripts": gtf["transcripts"],
+                           "exons": gtf["exons"], "header_build": gtf["header_build"]},
+            "index": {"prefix": str(paths.index_prefix), "status": "valid", "splice_sites_in_index": use_ss,
+                      "splice_sites_file": str(paths.splice_sites), "exons_file": str(paths.exons)},
+            "compatibility": {"errors": errors, "warnings": warns,
+                              "override": bool(r.get("override_compatibility"))},
+            "store": str(paths.base),
+        }
+        reference_manager.write_manifest(paths.manifest, manifest)
+        proj_manifest = ctx.project.path("reference", "reference_manifest.yaml")
+        reference_manager.write_manifest(proj_manifest, manifest)
+        reference_manager.link_into_project(ctx.project, paths)
+        summary_txt = ctx.project.path("reference", "reference_summary.txt")
+        summary_txt.write_text(
+            f"Reference: {r.get('label')}\nGenome: {fa['n_sequences']} sequences, {fa['total_bp']:,} bp\n"
+            f"Annotation: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} exons\n"
+            f"HISAT2 index: {paths.index_prefix} (splice sites in index: {use_ss})\n")
+        r.update({"index_prefix": str(paths.index_prefix), "index_has_splice_sites": use_ss,
+                  "splice_sites": str(paths.splice_sites), "gtf": str(paths.gtf), "bed12": str(paths.bed12),
+                  "genes": gtf["genes"], "genome_bp": fa["total_bp"]})
+        ctx.project.save()
+        outs = [proj_manifest, summary_txt, paths.gtf, paths.splice_sites, paths.bed12,
+                *reference_manager.index_files(paths.index_prefix)]
+        return outs, {"reference": r.get("label")}, {"genes": gtf["genes"]}
+
+    def revalidate(self, ctx, data):
+        r = ctx.project.state.get("reference") or {}
+        if not r.get("index_prefix") or not reference_manager.index_files(r["index_prefix"]):
+            return ["HISAT2 index files missing"]
+        return []
+
+
+class AlignmentStage(Stage):
+    key, title, depends, expensive = "alignment_completed", "ALIGNMENT (HISAT2)", \
+        ("trimming_completed", "reference_ready"), True
+    settings = ("hisat2_parameters", "samtools_sort_memory_per_thread", "min_overall_alignment_rate_fail",
+                "min_overall_alignment_rate_warn")
+
+    def overview(self, ctx):
+        r = ctx.project.state.get("reference") or {}
+        trimmed = bool((ctx.project.state.get("qc_decision") or {}).get("decision") == "trim")
+        return [("Samples", len(ctx.samples)),
+                ("Validated", f"{len(ctx.samples)}/{len(ctx.project.samples)}"),
+                ("Input reads", "trimmed" if trimmed else "raw"),
+                ("Reference", r.get("label")), ("Threads", ctx.threads),
+                ("Splice sites", "in index" if r.get("index_has_splice_sites") else "supplied at alignment"),
+                ("Options", "--dta" if ctx.cfg["hisat2_parameters"].get("dta") else "")]
+
+    def estimate_gb(self, ctx):
+        return storage.estimate(ctx.project, self.key, ctx.samples)
+
+    def execute(self, ctx):
+        p, r = ctx.project, ctx.ref()
+        paired = p.is_paired()
+        rows, failures, outs = [], {}, []
+        for sid in ctx.samples:
+            final = p.path("alignment", "bam", f"{sid}.sorted.bam")
+            reads = p.samples[sid]["trimmed"]["expected_reads_per_file"] if p.samples[sid].get("trimmed") \
+                else p.samples[sid].get("reads", {}).get("R1")
+            if not ctx.dry_run and final.exists():
+                ok, probs, m = bam_manager.validate_bam(final, reads, paired, ctx.threads)
+                if ok:
+                    ui.skipped(f"{sid}: existing BAM is valid; not re-aligning")
+                    rows.append(self._row(ctx, sid, m, reads, "PASS", []))
+                    outs += [final, Path(str(final) + ".bai"), p.path("alignment", "reports", f"{sid}.hisat2.summary")]
+                    continue
+                bad = final.with_name(f"{sid}.invalid.bam")
+                os.replace(final, bad)
+                ui.warn(f"{sid}: existing BAM invalid ({'; '.join(probs)}); moved to {bad.name}; re-aligning")
+            try:
+                alignment.align_sample(p, sid, r, ctx.cfg, ctx.threads, ctx.mem_gb, ctx.log("alignment", sid))
+            except PipelineError as e:
+                failures[sid] = str(e)
+                ui.failed(f"{sid}: alignment failed")
+                continue
+            if ctx.dry_run:
+                continue
+            ok, probs, m = bam_manager.validate_bam(final, reads, paired, ctx.threads)
+            hs = alignment.parse_hisat2_summary(p.path("alignment", "reports", f"{sid}.hisat2.summary"))
+            if hs.get("total") != reads:
+                probs.append(f"HISAT2 processed {hs.get('total')} {hs.get('unit', 'reads')}, expected {reads}")
+                ok = False
+            rate = hs.get("overall_alignment_rate", 0)
+            if rate < ctx.cfg["min_overall_alignment_rate_fail"]:
+                probs.append(f"overall alignment rate {rate}% < {ctx.cfg['min_overall_alignment_rate_fail']}% "
+                             "(wrong organism/reference or contaminated library?)")
+                ok = False
+            elif rate < ctx.cfg["min_overall_alignment_rate_warn"]:
+                ui.warn(f"{sid}: overall alignment rate {rate}% is low")
+            if not ok:
+                failures[sid] = "; ".join(probs)
+                bad = final.with_name(f"{sid}.FAILED.bam")
+                os.replace(final, bad)
+                if Path(str(final) + ".bai").exists():
+                    os.replace(Path(str(final) + ".bai"), Path(str(bad) + ".bai"))
+                ui.failed(f"{sid}: BAM failed validation — {failures[sid]}")
+                rows.append(self._row(ctx, sid, m, reads, "FAILED", probs))
+                continue
+            ui.ok(f"{sid}: BAM validated ({rate}% aligned, {m['primary']:,} primary records)")
+            rows.append(self._row(ctx, sid, m, reads, "PASS", []))
+            outs += [final, Path(str(final) + ".bai"), p.path("alignment", "reports", f"{sid}.hisat2.summary")]
+        if ctx.dry_run:
+            return [], {}, {}
+        summ = bam_manager.write_summary(rows, p.path("alignment", "reports", "alignment_summary.tsv"))
+        ui.info(f"alignment summary: {p.rel(summ)}")
+        _fail_samples(ctx, self.key, failures)
+        outs = [o for o in outs if not any(o.name.startswith(f + ".") for f in failures)]
+        return outs + [summ], {"samples": ctx.samples}, {"aligned": len(ctx.samples)}
+
+    def _row(self, ctx, sid, m, reads, status, probs):
+        hs = alignment.parse_hisat2_summary(ctx.project.path("alignment", "reports", f"{sid}.hisat2.summary")) \
+            if ctx.project.path("alignment", "reports", f"{sid}.hisat2.summary").exists() else {}
+        return {"sample": sid, "status": status, "input_reads": reads, "unit": hs.get("unit"),
+                "overall_alignment_rate": hs.get("overall_alignment_rate"),
+                "uniquely_aligned_pct": hs.get("uniquely_aligned_pct"),
+                "multi_aligned_pct": hs.get("multi_aligned_pct"), **m, "problems": "; ".join(probs)}
+
+    def revalidate(self, ctx, data):
+        problems = []
+        for sid in ctx.samples:
+            bam = ctx.project.path("alignment", "bam", f"{sid}.sorted.bam")
+            q = runner.tool_output(["samtools", "quickcheck", "-v", str(bam)])
+            if q is None or q.strip():
+                problems.append(f"{sid}: BAM fails quickcheck")
+        return problems
+
+
+class BamQCStage(Stage):
+    key, title, depends = "bam_qc_completed", "BAM QC (samtools + MultiQC)", ("alignment_completed",)
+
+    def execute(self, ctx):
+        p = ctx.project
+        out = p.path("alignment", "reports", "samtools")
+        files = []
+        for sid in ctx.samples:
+            files += bam_manager.qc_reports(p.path("alignment", "bam", f"{sid}.sorted.bam"), out, sid, ctx.threads,
+                                            ctx.log("bam_qc", sid))
+        mq = p.path("qc", "multiqc_alignment")
+        qc_manager.run_multiqc([p.path("alignment", "reports"), p.path("qc", "fastqc_raw")], mq,
+                               f"{p.name}: alignment QC", ctx.log("bam_qc"), self.key)
+        if ctx.dry_run:
+            return [], {}, {}
+        comb = p.path("alignment", "reports", "bam_qc_summary.tsv")
+        keys = ["raw total sequences", "reads mapped", "reads unmapped", "reads properly paired",
+                "reads duplicated", "error rate", "average length", "insert size average"]
+        with open(comb, "w") as f:
+            f.write("sample\t" + "\t".join(k.replace(" ", "_") for k in keys) + "\n")
+            for sid in ctx.samples:
+                s = bam_manager.parse_stats_summary(out / f"{sid}.samtools_stats")
+                if not s:
+                    raise PipelineError(f"samtools stats output empty for {sid}", stage=self.key)
+                f.write(sid + "\t" + "\t".join(s.get(k, "") for k in keys) + "\n")
+        ui.ok(f"BAM QC complete: {p.rel(comb)}")
+        return files + [comb, mq], {"samples": ctx.samples}, {}
+
+
+class StrandednessStage(Stage):
+    key, title, depends = "strandedness_determined", "LIBRARY STRANDEDNESS", ("alignment_completed", "reference_ready")
+    settings = ("strandedness", "strandedness_inference")
+
+    def execute(self, ctx):
+        p, cfg = ctx.project, ctx.cfg
+        si = cfg["strandedness_inference"]
+        configured = cfg.get("strandedness", "auto")
+        evidence, calls = {}, {}
+        have_rseqc = runner.which("infer_experiment.py") is not None
+        if have_rseqc:
+            for sid in ctx.samples:
+                bam = p.path("alignment", "bam", f"{sid}.sorted.bam")
+                ev = strandedness.run_infer(bam, ctx.ref()["bed12"], si["sample_reads"], ctx.log("strandedness", sid), sid)
+                evidence[sid] = ev
+                calls[sid] = strandedness.call(ev, si["stranded_min_fraction"], si["unstranded_max_diff"],
+                                               si["max_undetermined_fraction"])
+        if ctx.dry_run:
+            return [], {}, {}
+        ui.section("STRANDEDNESS EVIDENCE (RSeQC infer_experiment)")
+        if calls:
+            ui.table([(s, f"{e['forward']:.3f}" if e["forward"] is not None else "?",
+                       f"{e['reverse']:.3f}" if e["reverse"] is not None else "?",
+                       f"{e['undetermined']:.3f}" if e["undetermined"] is not None else "?",
+                       calls[s][0] or "UNDETERMINED", calls[s][1]) for s, e in evidence.items()],
+                     ["Sample", "Forward frac", "Reverse frac", "Undetermined", "Call", "Confidence"])
+            cons, conf, note = strandedness.consensus(calls)
+        else:
+            ui.warn("RSeQC (infer_experiment.py) not available; cannot infer strandedness")
+            cons, conf, note = None, "none", "no inference tool"
+        hints = strandedness.metadata_hints(p)
+        if hints:
+            print("\nMetadata hints (informational):")
+            for h in hints:
+                print(f"  {h}")
+        options = ["unstranded", "forward", "reverse"]
+        if configured != "auto":
+            value, source = configured, "config (user-specified)"
+            if cons and cons != configured:
+                ui.warn(f"configured strandedness '{configured}' disagrees with inferred '{cons}'")
+                i = ui.choose("Which strandedness should be used?", [f"{configured} (configured)", f"{cons} (inferred)"])
+                value, source = (configured, "config (confirmed against inference)") if i == 0 else (cons, "RSeQC (user-selected)")
+            confidence = "user-specified"
+        elif cons:
+            ui.ok(f"inferred strandedness: {cons.upper()} ({conf} confidence; {note})")
+            if ui.ask_yes_no(f"Use '{cons}' strandedness for featureCounts/StringTie2?", default=True):
+                value, source, confidence = cons, "RSeQC infer_experiment", conf
+            else:
+                value = options[ui.choose("Select strandedness", options)]
+                source, confidence = "user-selected (overrode inference)", "user-specified"
+        else:
+            print()
+            ui.warn("Library strandedness could not be automatically established.")
+            value = options[ui.choose("Select strandedness (check the library prep kit; dUTP/TruSeq Stranded = reverse)",
+                                      options)]
+            source, confidence = "user-selected (inference inconclusive)", "user-specified"
+        rec = {"value": value, "source": source, "confidence": confidence,
+               "featurecounts_flag": strandedness.FEATURECOUNTS_FLAG[value],
+               "stringtie_flag": strandedness.STRINGTIE_FLAG[value],
+               "evidence": evidence, "per_sample_calls": {s: list(c) for s, c in calls.items()}}
+        p.state["strandedness"] = rec
+        p.save()
+        out = p.path("alignment", "reports", "strandedness.json")
+        out.write_text(json.dumps(rec, indent=2))
+        ui.ok(f"strandedness: {value} (source: {source}; confidence: {confidence})")
+        return [out], {"samples": ctx.samples, "value": value}, {"value": value}
+
+
+class StringTieStage(Stage):
+    key, title, depends, expensive = "stringtie_completed", "TRANSCRIPT QUANTIFICATION (StringTie2)", \
+        ("strandedness_determined", "alignment_completed", "reference_ready"), True
+    settings = ("stringtie_parameters",)
+
+    def overview(self, ctx):
+        return [("Mode", "reference-guided (-e): annotated transcripts only"),
+                ("Strandedness", (ctx.project.state.get("strandedness") or {}).get("value")),
+                ("Samples", len(ctx.samples)), ("Note", "independent of the DESeq2 count matrix")]
+
+    def execute(self, ctx):
+        p = ctx.project
+        strand = (p.state.get("strandedness") or {}).get("value", "unstranded")
+        outs, failures = [], {}
+        for sid in ctx.samples:
+            try:
+                g, a = stringtie.run_sample(p, sid, p.path("alignment", "bam", f"{sid}.sorted.bam"), ctx.ref()["gtf"],
+                                            strand, ctx.cfg["stringtie_parameters"], ctx.threads,
+                                            ctx.log("stringtie", sid))
+                outs += [g, a]
+            except PipelineError as e:
+                failures[sid] = str(e)
+        if ctx.dry_run:
+            return [], {}, {}
+        if failures:
+            raise PipelineError("StringTie2 failed for: " + ", ".join(failures), stage=self.key,
+                                cause="; ".join(failures.values()))
+        files, ng, nt = stringtie.merge_tables(p, ctx.samples)
+        ui.ok(f"StringTie2 validated: {nt:,} transcripts / {ng:,} genes quantified (TPM matrices in stringtie/merged/)")
+        return outs + files, {"samples": ctx.samples, "strand": strand}, {"genes": ng, "transcripts": nt}
+
+
+class FeatureCountsStage(Stage):
+    key, title, depends = "featurecounts_completed", "GENE COUNTING (featureCounts)", \
+        ("strandedness_determined", "alignment_completed", "reference_ready")
+    settings = ("featurecounts_parameters",)
+
+    def overview(self, ctx):
+        fc = ctx.cfg["featurecounts_parameters"]
+        s = (ctx.project.state.get("strandedness") or {}).get("value")
+        return [("Samples", len(ctx.samples)), ("Paired-end", ctx.project.is_paired()),
+                ("Strandedness", f"{s} (-s {strandedness.FEATURECOUNTS_FLAG.get(s, '?')})"),
+                ("Feature / attribute", f"{fc['feature_type']} / {fc['attribute']}"),
+                ("Multimappers", "counted" if fc["count_multimapping"] else "not counted")]
+
+    def execute(self, ctx):
+        p = ctx.project
+        strand = (p.state.get("strandedness") or {}).get("value")
+        if strand not in strandedness.FEATURECOUNTS_FLAG:
+            raise PipelineError("strandedness not established", stage=self.key)
+        bams = [p.path("alignment", "bam", f"{sid}.sorted.bam") for sid in ctx.samples]
+        txt, summ, cmd = featurecounts.run(p, ctx.samples, bams, ctx.ref()["gtf"], strand, p.is_paired(),
+                                           ctx.cfg["featurecounts_parameters"], ctx.threads, ctx.log("featurecounts"))
+        if ctx.dry_run:
+            return [], {}, {}
+        genes, counts = featurecounts.parse(txt, bams)
+        exp = ctx.ref().get("genes")
+        if exp and len(genes) != exp:
+            raise PipelineError(f"featureCounts reported {len(genes)} genes but the GTF has {exp}", stage=self.key)
+        stats = featurecounts.parse_summary(summ, bams, ctx.samples)
+        ui.table([(s, f"{v['assigned']:,}", f"{v['assigned_pct']}%") for s, v in stats.items()],
+                 ["Sample", "Assigned", "Assigned %"])
+        low = [s for s, v in stats.items() if v["assigned_pct"] < featurecounts.LOW_ASSIGNED_WARN]
+        if low:
+            ui.warn(f"low assignment rate (<{featurecounts.LOW_ASSIGNED_WARN}%) for {low}: check strandedness, "
+                    "annotation and rRNA contamination")
+        (p.path("featurecounts", "featurecounts_stats.json")).write_text(json.dumps(stats, indent=2))
+        ui.ok(f"featureCounts output validated: {len(genes):,} genes x {len(bams)} samples")
+        return [txt, summ, p.path("featurecounts", "featurecounts_stats.json")], \
+            {"samples": ctx.samples, "strand": strand, "command": runner.fmt(cmd)}, {"genes": len(genes)}
+
+
+class CountMatrixStage(Stage):
+    key, title, depends = "count_matrix_completed", "GENE COUNT MATRIX", ("featurecounts_completed",)
+
+    def execute(self, ctx):
+        if ctx.dry_run:
+            ui.status("DRY-RUN", "would build counts/gene_count_matrix.tsv/.csv from featureCounts output")
+            return [], {}, {}
+        p = ctx.project
+        bams = [p.path("alignment", "bam", f"{sid}.sorted.bam") for sid in ctx.samples]
+        genes, counts = featurecounts.parse(p.path("featurecounts", "featurecounts.txt"), bams)
+        b2s = {str(b): s for b, s in zip(bams, ctx.samples)}
+        matrix = count_matrix.build(genes, counts, b2s, ctx.samples)
+        groups = {}
+        for sid in ctx.samples:
+            groups.setdefault(p.samples[sid].get("bio_unit") or sid, []).append(sid)
+        collapsed = False
+        extra = []
+        if any(len(v) > 1 for v in groups.values()):
+            ui.section("TECHNICAL REPLICATES / LANES DETECTED")
+            for u, runs in groups.items():
+                if len(runs) > 1:
+                    print(f"  {u}: {', '.join(runs)}")
+            print("Runs of the same library (lanes / technical replicates) are normally SUMMED before DESeq2.")
+            if ui.ask_yes_no("Sum counts of runs belonging to the same biological sample?", default=True):
+                count_matrix.write(genes, matrix, p.path("counts", "gene_count_matrix_per_run.tsv"),
+                                   p.path("counts", "gene_count_matrix_per_run.csv"))
+                matrix = count_matrix.collapse(genes, matrix, {count_matrix_safe(u): r for u, r in groups.items()})
+                collapsed = True
+                extra.append("Technical replicates summed: " +
+                             "; ".join(f"{u} = {'+'.join(r)}" for u, r in groups.items() if len(r) > 1))
+        tsv, csvp = count_matrix.write(genes, matrix, p.path("counts", "gene_count_matrix.tsv"),
+                                       p.path("counts", "gene_count_matrix.csv"))
+        info = count_matrix.validate_file(tsv, expected_samples=list(matrix), expected_genes=len(genes))
+        units = list(matrix)
+        p.state["count_units"] = units
+        p.state["count_unit_runs"] = {count_matrix_safe(u): r for u, r in groups.items()} if collapsed \
+            else {s: [s] for s in ctx.samples}
+        p.save()
+        sinfo = p.path("counts", "sample_info.tsv")
+        with open(sinfo, "w") as f:
+            f.write("sample\truns\tsource\tdescription\n")
+            for u in units:
+                runs = p.state["count_unit_runs"][u]
+                rec = p.samples[runs[0]]
+                meta = rec.get("metadata") or {}
+                desc = meta.get("geo_title") or meta.get("sample_title") or ""
+                f.write(f"{u}\t{','.join(runs)}\t{rec.get('source')}\t{desc}\n")
+        summ = count_matrix.write_summary(p.path("counts", "count_matrix_summary.txt"), info, extra)
+        ui.ok(f"count matrix validated: {info['genes']:,} genes x {len(units)} samples "
+              f"({info['all_zero_genes']:,} genes with zero counts everywhere)")
+        return [tsv, csvp, summ, sinfo], {"samples": ctx.samples, "collapsed": collapsed}, \
+            {"genes": info["genes"], "units": units}
+
+
+def count_matrix_safe(u):
+    return data_manager.sanitize_sample_name(u)
+
+
+class DesignStage(Stage):
+    key, title, depends = "design_confirmed", "EXPERIMENTAL DESIGN / METADATA CONFIRMATION", ("count_matrix_completed",)
+    settings = ("design_formula", "reference_level")
+
+    def execute(self, ctx):
+        if ctx.dry_run:
+            ui.status("DRY-RUN", "design must be confirmed interactively before DESeq2")
+            return [], {}, {}
+        p = ctx.project
+        units = p.state["count_units"]
+        info = {}
+        for u in units:
+            rec = p.samples[p.state["count_unit_runs"][u][0]]
+            info[u] = {k: v for k, v in (rec.get("metadata") or {}).items() if isinstance(v, str)}
+        if not design.interactive(p, units, info, ctx.cfg):
+            raise UserAbort("design not confirmed yet")
+        d = design.confirmed_design(p)
+        meta = p.abs(d["metadata_file"])
+        problems = count_matrix.check_metadata_match(units, d["samples"])
+        if problems:
+            raise PipelineError("metadata does not match count matrix: " + "; ".join(problems), stage=self.key)
+        params = r_bridge.build_params(p, ctx.cfg, d)
+        pp = r_bridge.write_params(p, params)
+        rs = ctx.envs.rscript()
+        if rs:
+            r_bridge.run(rs, pp, ctx.log("deseq2"), validate_only=True)
+        return [meta, p.path("counts", "design.json")], {"formula": d["formula"]}, d
+
+
+class DESeq2Stage(Stage):
+    key, title, depends, expensive = "deseq2_completed", "R / DESeq2 DIFFERENTIAL EXPRESSION", \
+        ("design_confirmed", "count_matrix_completed"), True
+    settings = ("alpha", "log2fc_threshold", "lfc_test_threshold", "min_count_filter", "lfc_shrinkage",
+                "transformation", "top_n_genes", "heatmap_max_genes", "independent_filtering", "cooks_cutoff")
+
+    def check_inputs(self, ctx):
+        probs = []
+        if not ctx.envs.rscript():
+            probs.append("Rscript not found (install the R environment via main menu 4)")
+        if not ctx.dry_run and not design.confirmed_design(ctx.project):
+            probs.append("experimental design is not confirmed (or metadata changed since confirmation)")
+        return probs
+
+    def execute(self, ctx):
+        p, cfg = ctx.project, ctx.cfg
+        d = design.confirmed_design(p) if not ctx.dry_run else (p.state.get("design") or {})
+        s = p.state.get("strandedness") or {}
+        ui.section("PYTHON PIPELINE COMPLETE")
+        ui.kv([("Count matrix", p.rel(p.path("counts", "gene_count_matrix.tsv"))),
+               ("Metadata", d.get("metadata_file")), ("Design", d.get("formula")),
+               ("Samples", len(d.get("samples", []))),
+               ("Contrasts", ", ".join(f"{a} vs {b}" for a, b in d.get("contrasts", []))),
+               ("Reference", (p.state.get("reference") or {}).get("label")),
+               ("Strandedness", f"{s.get('value')} ({s.get('source')})"),
+               ("Thresholds", f"padj < {cfg['alpha']}, |log2FC| >= {cfg['log2fc_threshold']}"),
+               ("Low-count filter", f">= {cfg['min_count_filter']['min_count']} counts in >= "
+                                    f"{cfg['min_count_filter']['min_samples']} samples")])
+        (p.path("reports", "transition_record.txt")).write_text(
+            f"PYTHON PIPELINE COMPLETE\nCount matrix: counts/gene_count_matrix.tsv\nMetadata: {d.get('metadata_file')}\n"
+            f"Design: {d.get('formula')}\nSamples: {', '.join(d.get('samples', []))}\n"
+            f"Reference: {(p.state.get('reference') or {}).get('label')}\nStrandedness: {s.get('value')}\n")
+        if not ctx.dry_run and not ui.ask_yes_no("Proceed to DESeq2?", default=True):
+            raise UserAbort("DESeq2 not started")
+        if ctx.dry_run:
+            runner.run([ctx.envs.rscript() or "Rscript", "--vanilla", r_bridge.R_MAIN, "deseq2_params.json"],
+                       stage=self.key)
+            return [], {}, {}
+        orgdb = None
+        r = p.state.get("reference") or {}
+        if cfg.get("annotation", {}).get("enabled"):
+            orgdb = C.load_catalog()["organisms"].get(r.get("organism"), {}).get("bioc_orgdb")
+        params = r_bridge.build_params(p, cfg, d, orgdb)
+        pp = r_bridge.write_params(p, params)
+        r_bridge.run(ctx.envs.rscript(), pp, ctx.log("deseq2"))
+        summary = r_bridge.validate_outputs(p, params)
+        for name, c in summary["contrasts"].items():
+            for kind in ("upregulated", "downregulated"):
+                link = p.path("results", kind, f"{name}_{kind}.tsv")
+                target = Path(c["dir"]) / f"{kind}.tsv"
+                if link.is_symlink():
+                    link.unlink()
+                if not link.exists():
+                    link.symlink_to(os.path.relpath(target, link.parent))
+        ui.section("DIFFERENTIAL EXPRESSION RESULTS")
+        ui.table([(n, c["genes_tested"], c["significant"], c["up"], c["down"]) for n, c in summary["contrasts"].items()],
+                 ["Contrast", "Genes tested", "Significant", "Up", "Down"])
+        ui.info(f"thresholds: padj < {cfg['alpha']} and |log2FC| >= {cfg['log2fc_threshold']}")
+        outs = [p.path("results", "deseq2"), p.path("results", "plots"), p.path("results", "tables")]
+        return outs, {"params": params}, {"contrasts": {n: {k: c[k] for k in ("significant", "up", "down")}
+                                                        for n, c in summary["contrasts"].items()}}
+
+
+class ReportStage(Stage):
+    key, title, depends = "report_generated", "FINAL REPORT + MANIFEST", ("deseq2_completed",)
+
+    def execute(self, ctx):
+        from . import manifest, report_manager
+        if ctx.dry_run:
+            ui.status("DRY-RUN", "would write reports/final_pipeline_report.html and pipeline_manifest/")
+            return [], {}, {}
+        mfiles = manifest.write(ctx)
+        rep = report_manager.generate(ctx)
+        ui.ok(f"final report: {rep}")
+        return [rep] + mfiles, {}, {}
+
+
+STAGES = [DataStage(), FastqVerifyStage(), RawQCStage(), QualityGateStage(), TrimmingStage(), ReferenceStage(),
+          AlignmentStage(), BamQCStage(), StrandednessStage(), StringTieStage(), FeatureCountsStage(),
+          CountMatrixStage(), DesignStage(), DESeq2Stage(), ReportStage()]
+BY_KEY = {s.key: s for s in STAGES}
+
+
+# ============================================================================ status / resume
+
+def stage_status(ctx, stage, deep=False, memo=None):
+    """VALID / INVALID(reason) / PENDING. A stage is VALID only if all upstream stages are VALID too."""
+    memo = {} if memo is None else memo
+    if stage.key in memo:
+        return memo[stage.key]
+    data = ctx.cp.read(stage.key)
+    if data is None:
+        memo[stage.key] = ("PENDING", None)
+        return memo[stage.key]
+    for dep in stage.depends:
+        s, _ = stage_status(ctx, BY_KEY[dep], deep, memo)
+        if s != "VALID":
+            memo[stage.key] = ("INVALID", f"upstream stage '{dep}' is {s}")
+            return memo[stage.key]
+    probs = ctx.cp.verify_files(stage.key, deep=deep)
+    cleaned = set(ctx.project.state.get("cleaned_files", []))
+    probs = [x for x in probs if not any(x.endswith(c) for c in cleaned)]
+    rec_samples = set((data.get("params") or {}).get("samples") or [])
+    if rec_samples and not set(ctx.samples) <= rec_samples:
+        probs.append("sample selection changed (new samples not yet processed)")
+    for dep in stage.depends:
+        if ctx.cp.read(dep) is None:
+            probs.append(f"upstream stage {dep} has no checkpoint")
+    if not probs:
+        try:
+            probs = stage.revalidate(ctx, data)
+        except Exception as e:  # revalidation must never crash the resume screen
+            probs = [f"revalidation error: {e}"]
+    memo[stage.key] = ("VALID", None) if not probs else ("INVALID", "; ".join(probs[:3]))
+    return memo[stage.key]
+
+
+def status_table(ctx, deep=False):
+    rows, memo = [], {}
+    for i, st in enumerate(STAGES, 1):
+        s, why = stage_status(ctx, st, deep, memo)
+        rows.append((i, st.title, s, why or ""))
+    return rows
+
+
+def show_status(ctx, deep=False):
+    ui.section(f"PROJECT STATUS — {ctx.project.name}")
+    rows = status_table(ctx, deep)
+    ui.table(rows, ["#", "Stage", "Status", "Detail"], max_col=60)
+    return rows
+
+
+# ============================================================================ interactive runner
+
+def stage_screen(ctx, idx, stage):
+    """Returns 'run', 'menu' or 'cancel'."""
+    while True:
+        ui.header(f"STEP {idx} — {stage.title}")
+        pairs = stage.overview(ctx) or [("Samples", len(ctx.samples))]
+        est = stage.estimate_gb(ctx)
+        if est:
+            pairs.append(("Estimated storage", f"{est:.1f} GB"))
+        pairs.append(("CPU / threads", f"{ctx.sysinfo['cpu_cores']} cores / {ctx.threads} threads"))
+        ui.kv(pairs)
+        problems = stage.check_inputs(ctx)
+        for pr in problems:
+            ui.error(pr)
+        c = ui.choose(None, ["Start " + stage.title.split(" (")[0].lower(), "Review settings", "Change settings",
+                             "Validate inputs again", "Return to main menu", "Cancel"])
+        if c == 0:
+            if problems:
+                ui.error("resolve the input problems above first")
+                continue
+            return "run"
+        if c == 1:
+            show_settings(ctx, stage)
+        elif c == 2:
+            change_settings(ctx, stage)
+        elif c == 3:
+            probs = stage.check_inputs(ctx)
+            for dep in stage.depends:
+                s, why = stage_status(ctx, BY_KEY[dep])
+                if s != "VALID":
+                    probs.append(f"upstream {dep}: {s} {why or ''}")
+            if probs:
+                for pr in probs:
+                    ui.error(pr)
+            else:
+                ui.ok("inputs validated")
+        elif c == 4:
+            return "menu"
+        else:
+            return "cancel"
+
+
+def show_settings(ctx, stage):
+    ui.section("SETTINGS")
+    if not stage.settings:
+        print("  (no configurable settings for this stage)")
+    for key in stage.settings:
+        print(f"  {key}: {json.dumps(C.get(ctx.cfg, key), default=str)}")
+
+
+def change_settings(ctx, stage):
+    if not stage.settings:
+        ui.info("no configurable settings for this stage")
+        return
+    keys = [k for k in stage.settings if not isinstance(C.get(ctx.cfg, k), dict)]
+    for k in stage.settings:
+        v = C.get(ctx.cfg, k)
+        if isinstance(v, dict):
+            keys += [f"{k}.{sub}" for sub, sv in v.items() if not isinstance(sv, dict)]
+    i = ui.choose("Which setting?", [f"{k} = {json.dumps(C.get(ctx.cfg, k), default=str)}" for k in keys])
+    key = keys[i]
+    old = C.get(ctx.cfg, key)
+    raw = ui.ask(f"New value for {key}", default=json.dumps(old, default=str))
+    try:
+        import yaml
+        new = yaml.safe_load(raw)
+    except Exception:
+        new = raw
+    trial = json.loads(json.dumps(ctx.cfg, default=str))
+    C.set_value(trial, key, new)
+    errs = C.validate(trial, ctx.sysinfo["cpu_cores"])
+    if errs:
+        for e in errs:
+            ui.error(e)
+        return
+    C.set_value(ctx.cfg, key, new)
+    ctx.project.save_config(ctx.cfg)
+    ui.ok(f"{key} set to {new!r} (saved to config/project_config.yaml)")
+    if ctx.cp.exists(stage.key):
+        ui.warn("this stage already has a checkpoint; re-run it for the new setting to take effect")
+
+
+def run_stage(ctx, idx, stage):
+    """Execute one stage with full START/VALIDATION/EXECUTION/POST-VALIDATION/checkpoint semantics."""
+    ui.status("RUNNING", f"STEP {idx}: {stage.title} — START")
+    for dep in stage.depends:
+        s, why = stage_status(ctx, BY_KEY[dep])
+        if s != "VALID" and not ctx.dry_run:
+            raise PipelineError(f"upstream stage '{dep}' is {s}" + (f": {why}" if why else ""), stage=stage.key,
+                                remedy="resume the project so earlier stages are completed first")
+    probs = stage.check_inputs(ctx)
+    if probs:
+        raise PipelineError("; ".join(probs), stage=stage.key)
+    ui.ok("inputs validated")
+    est = stage.estimate_gb(ctx)
+    if est >= 1 and not ctx.dry_run:
+        if not storage.preflight(ctx.project.root, est, ctx.cfg):
+            raise UserAbort("insufficient/borderline storage")
+    outputs, params, summary = stage.execute(ctx)
+    if ctx.dry_run:
+        ui.status("DRY-RUN", f"{stage.title}: no outputs written, no checkpoint")
+        return
+    ctx.cp.write(stage.key, outputs, params=params, depends_on=stage.depends, summary=summary)
+    ctx.project.log_event(f"stage {stage.key} completed")
+    ui.ok(f"STEP {idx}: {stage.title} — SUCCESS (checkpoint written)")
+
+
+def run_pipeline(ctx, from_stage=None, only=None):
+    """Walk the state machine; skip valid stages; stop on failure/abort. Returns True when all done."""
+    start = 0 if from_stage is None else [s.key for s in STAGES].index(from_stage)
+    for i, st in enumerate(STAGES[start:], start + 1):
+        if only and st.key != only:
+            continue
+        s, why = stage_status(ctx, st)
+        if s == "VALID":
+            ui.ok(f"STEP {i}: {st.title} — already complete (checkpoint revalidated)")
+            continue
+        if s == "INVALID":
+            ui.warn(f"STEP {i}: checkpoint no longer valid ({why}); stage will be re-run")
+        if not ctx.dry_run and not (ctx.auto and not st.expensive):
+            choice = stage_screen(ctx, i, st)
+            if choice != "run":
+                return False
+        try:
+            run_stage(ctx, i, st)
+        except KeyboardInterrupt:
+            print()
+            ui.warn(f"interrupted during {st.title}; partial outputs are kept as *.partial and will not be "
+                    "used. Resume the project to continue.")
+            ctx.project.log_event(f"stage {st.key} interrupted")
+            return False
+        except UserAbort as e:
+            ui.info(f"stopped: {e}")
+            return False
+        except PipelineError as e:
+            if not e.stage:
+                e.stage = st.key
+            ui.explain_failure(e)
+            ctx.project.log_event(f"stage {st.key} failed: {e}")
+            return False
+    if ctx.dry_run:
+        ui.ok("dry run complete — nothing was executed or written")
+        return True
+    return True
