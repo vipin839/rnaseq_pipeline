@@ -331,3 +331,30 @@ def test_ncbi_ftp_path_and_package():
                                           "annotation": "RS_2025"})
     assert pkg["genome"]["url"].endswith("GCF_000013265.1_ASM1326v1_genomic.fna.gz")
     assert pkg["annotation"]["url"].endswith("_genomic.gtf.gz") and pkg["checksum"]["type"] == "md5"
+
+
+# ---------------- NCBI Entrez helpers ----------------
+def test_entrez_build_term():
+    from rnaseq import entrez
+    assert entrez.build_term([("biofilm", None), ("Escherichia coli", "Organism"), ("rna seq", "Strategy")]) == \
+        'biofilm AND "Escherichia coli"[Organism] AND "rna seq"[Strategy]'
+    assert entrez.build_term([("", "Organism"), ("x", None)]) == "x"
+    assert entrez.build_term([('"already quoted"', "Title")]) == '"already quoted"[Title]'
+
+
+def test_entrez_rate_limit_from_config():
+    from rnaseq import entrez
+    entrez.configure({"ncbi": {"email": "a@b.c", "api_key": ""}})
+    assert abs(entrez._state["min_interval"] - 1 / 3) < 1e-9
+    entrez.configure({"ncbi": {"email": "a@b.c", "api_key": "KEY"}})
+    assert abs(entrez._state["min_interval"] - 1 / 10) < 1e-9
+    entrez.configure({})
+    assert entrez._state["email"] == "" and entrez._state["api_key"] == ""
+
+
+def test_ncbi_email_validated():
+    cfg = C.load()
+    C.set_value(cfg, "ncbi.email", "not-an-email")
+    assert any("ncbi.email" in e for e in C.validate(cfg, 4))
+    C.set_value(cfg, "ncbi.email", "user@example.org")
+    assert C.validate(cfg, 4) == []

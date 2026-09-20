@@ -26,6 +26,12 @@ but not fatal, `[ERROR]`/`[FAILED]` stopped, `[SKIPPED]` not needed (already val
    or a read-only location) stop here.
 2. **Project name.** Letters, digits, `.`, `_` and `-` only. A folder `RNAseq_<name>` is created.
 3. **Data input**
+   * *Search NCBI for a dataset* (no accession needed): search **GEO series** or **SRA runs** by keywords and
+     by field, e.g. organism, strategy, platform, date. Option *Show searchable fields (indexes)* lists the
+     indexes of a database (from NCBI `einfo`) so you can see exactly what can be filtered on. Results are
+     shown page by page with organism, sample count and title; pick one and its runs are loaded into the project.
+     NCBI asks callers to identify themselves: set `ncbi.email` in the configuration, and optionally a free
+     `ncbi.api_key` (raises the rate limit from 3 to 10 requests/second).
    * *NCBI SRA*: run, experiment, study or BioProject accessions. Downloaded with `prefetch`, checked with
      `vdb-validate`, and converted with `fasterq-dump`.
    * *NCBI GEO*: a series (GSE). Samples are linked to SRA runs, and GEO sample characteristics are shown to help you.

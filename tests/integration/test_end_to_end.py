@@ -45,7 +45,7 @@ def run_cli(args, answers, timeout=1800):
 
 
 def new_project_answers(name, parent, fastq_dir, fasta, gtf):
-    return ["1", name, str(parent), "4", str(fastq_dir), "", "1", "y",
+    return ["1", name, str(parent), "5", str(fastq_dir), "", "1", "y",
             "5", str(fasta), str(gtf), "Synthetic", "SYNTH1", "", "synth-v1", "y", "n", "1", "y",
             "1", "1", "1", "1", "1",           # data, fastq, raw qc, gate screen, accept recommendation
             "1", "1", "1", "1",                # trimming, reference, alignment, bam qc
@@ -188,7 +188,7 @@ def test_corrupted_fastq_stops_pipeline(synth, tmp_path):
     bad.write_bytes(data[: len(data) // 3])
     cfg = tmp_path / "o.yaml"
     cfg.write_text(f"reference_store: {tmp_path / 'refstore'}\n")
-    answers = ["1", "Broken", str(tmp_path / "projects"), "4", str(fq), "", "1", "y",
+    answers = ["1", "Broken", str(tmp_path / "projects"), "5", str(fq), "", "1", "y",
                "5", str(synth / "genome.fa"), str(synth / "annotation.gtf"), "Synthetic", "SYNTH1", "", "v1", "y",
                "n", "1", "y", "1", "1", "n", "8"]
     r = run_cli(["--config", str(cfg), "--projects-dir", str(tmp_path / "projects")], answers, timeout=900)

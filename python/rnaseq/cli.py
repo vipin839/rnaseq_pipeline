@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import (PIPELINE_ROOT, PipelineError, UserAbort, __version__, data_manager, dependency_manager, design,
-               environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
+               entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
 from . import config as C
 from . import validators as V
 from .project import DEFAULT_PROJECTS_DIR, Project
@@ -32,6 +32,7 @@ class App:
         if args.config:
             self.cfg = C.deep_merge(self.cfg, C.load_yaml(V.existing_file(args.config)))
             C.require_valid(self.cfg, os.cpu_count())
+        entrez.configure(self.cfg)
         self.envs = environment_manager.Environments(self.cfg)
         self.envs.activate()
         self.projects_dir = Path(args.projects_dir).expanduser() if args.projects_dir else DEFAULT_PROJECTS_DIR
@@ -129,12 +130,15 @@ class App:
     # ------------------------------------------------------------------ data input
     def choose_data(self, p):
         while True:
-            c = ui.choose("DATA INPUT", ["NCBI SRA accession(s)", "NCBI GEO accession", "ENA accession(s)",
+            c = ui.choose("DATA INPUT", ["Search NCBI for a dataset (keywords / fields, no accession needed)",
+                                         "NCBI SRA accession(s)", "NCBI GEO accession", "ENA accession(s)",
                                          "Local FASTQ files", "Existing project data"])
             try:
-                if c in (0, 1, 2):
-                    self._public(p, {0: "sra", 1: "geo", 2: "ena"}[c])
-                elif c == 3:
+                if c == 0:
+                    self._entrez_search(p)
+                elif c in (1, 2, 3):
+                    self._public(p, {1: "sra", 2: "geo", 3: "ena"}[c])
+                elif c == 4:
                     self._local(p)
                 else:
                     samples = data_manager.existing_project_fastqs(p)
@@ -145,6 +149,134 @@ class App:
                 if not ui.ask_yes_no("Try again?", default=True):
                     raise UserAbort("data input cancelled")
 
+    def _entrez_search(self, p):
+        """Interactive NCBI discovery: GEO series or SRA runs, with einfo-driven field menus."""
+        while True:
+            db = ui.choose("SEARCH NCBI", ["GEO datasets (series) — recommended: gives sample descriptions",
+                                           "SRA runs (sequencing runs directly)",
+                                           "Show searchable fields (indexes) of a database",
+                                           "Back to data input"])
+            if db == 3:
+                return
+            if db == 2:
+                self._show_indexes()
+                continue
+            term = self._build_query("gds" if db == 0 else "sra")
+            if not term:
+                continue
+            if db == 0:
+                if self._geo_results(p, term):
+                    return
+            elif self._sra_results(p, term):
+                return
+
+    def _show_indexes(self):
+        dbs = ["gds", "sra", "bioproject", "biosample", "assembly", "taxonomy"]
+        i = ui.choose("Database", dbs)
+        flds, total = entrez.fields(dbs[i])
+        ui.section(f"SEARCHABLE FIELDS of '{dbs[i]}' ({total:,} records)")
+        ui.table([(f["name"], f["fullname"], f["description"]) for f in flds],
+                 ["Index", "Name", "Description"], max_col=58)
+        print("\n  Use them as  value[Index]  — e.g.  \"Homo sapiens\"[Organism] AND rna seq[Strategy]")
+        ui.pause()
+
+    def _build_query(self, db):
+        """Free-text plus optional field terms taken from the database's own index list."""
+        parts = []
+        free = ui.ask("Keywords (free text, e.g. biofilm dexamethasone; blank to use only fields)",
+                      allow_empty=True, default="")
+        if free:
+            parts.append((free, None))
+        if ui.ask_yes_no("Add field restrictions (organism, strategy, date, ...)?", default=True):
+            common = {"gds": [("Organism", "Organism"), ("DataSet Type", "DataSet Type"),
+                              ("Entry Type", "Entry Type"), ("Title", "Title"),
+                              ("Publication Date", "Publication Date")],
+                      "sra": [("Organism", "Organism"), ("Strategy", "Strategy"), ("Platform", "Platform"),
+                              ("Layout", "Layout"), ("BioProject", "BioProject"), ("Text Word", "Text Word")]}[db]
+            while True:
+                labels = [f"{n} [{f}]" for n, f in common] + ["Other field (choose from the full index list)",
+                                                              "Done"]
+                i = ui.choose("Restrict by", labels)
+                if i == len(labels) - 1:
+                    break
+                if i == len(labels) - 2:
+                    flds, _ = entrez.fields(db)
+                    j = ui.choose("Field", [f"{f['name']:<6} {f['fullname']} — {f['description'][:50]}"
+                                            for f in flds])
+                    field = flds[j]["fullname"]
+                else:
+                    field = common[i][1]
+                hint = {"Strategy": "e.g. rna seq", "Platform": "e.g. illumina", "Layout": "paired or single",
+                        "Organism": "e.g. Escherichia coli", "Publication Date": 'e.g. "2020"[PDAT] : "2026"[PDAT]',
+                        "DataSet Type": "e.g. expression profiling by high throughput sequencing"}.get(field, "")
+                val = ui.ask(f"  {field} value" + (f" ({hint})" if hint else ""), allow_empty=True, default="")
+                if val:
+                    parts.append((val, field))
+        term = entrez.build_term(parts)
+        if not term:
+            ui.warn("empty query")
+            return None
+        ui.info(f"query: {term}")
+        return term
+
+    def _geo_results(self, p, term):
+        start, page = 0, 10
+        while True:
+            ui.running("Searching GEO...")
+            count, rows, translation = entrez.geo_series(term, retmax=page, retstart=start)
+            if not rows:
+                ui.warn(f"no GEO series found ({count} hits). NCBI read the query as: {translation}")
+                return False
+            ui.section(f"GEO SERIES {start + 1}-{start + len(rows)} of {count}")
+            ui.table([(r["accession"], r["organism"], r["samples"], r["date"], r["title"]) for r in rows],
+                     ["Accession", "Organism", "Samples", "Date", "Title"], max_col=46)
+            opts = [f"{r['accession']}  {r['title'][:60]}" for r in rows]
+            extra = (["Next page"] if start + page < count else []) + \
+                    (["Previous page"] if start else []) + ["New search"]
+            i = ui.choose("Select a dataset (or navigate)", opts + extra)
+            if i < len(rows):
+                r = rows[i]
+                ui.section(f"{r['accession']} — {r['title']}")
+                ui.kv([("Organism", r["organism"]), ("Samples", r["samples"]), ("Type", r["type"]),
+                       ("Released", r["date"]), ("BioProject", r["bioproject"])])
+                if r["summary"]:
+                    print("\n  " + r["summary"].replace("\n", " ")[:400] + "...")
+                if not ui.ask_yes_no(f"Use {r['accession']} for this project?", default=True):
+                    continue
+                self._public_from_accessions(p, [(r["accession"], "geo_series")], "geo")
+                return True
+            choice = extra[i - len(rows)]
+            if choice == "Next page":
+                start += page
+            elif choice == "Previous page":
+                start = max(0, start - page)
+            else:
+                return False
+
+    def _sra_results(self, p, term):
+        ui.running("Searching SRA...")
+        count, rows = entrez.runinfo(term, retmax=300)
+        if not rows:
+            ui.warn(f"no SRA runs found ({count} hits)")
+            return False
+        if count > len(rows):
+            ui.warn(f"{count:,} runs match; showing the first {len(rows)} — add filters to narrow the search")
+        ui.section(f"SRA RUNS ({len(rows)} shown)")
+        ui.table([(r["Run"], r.get("ScientificName", ""), r.get("LibraryStrategy", ""), r.get("LibraryLayout", ""),
+                   f"{int(r['spots']):,}" if r.get("spots", "").isdigit() else "?",
+                   r.get("size_MB", ""), r.get("SampleName", "") or r.get("Experiment", ""))
+                  for r in rows[:50]],
+                 ["Run", "Organism", "Strategy", "Layout", "Spots", "MB", "Sample"], max_col=34)
+        if len(rows) > 50:
+            ui.info(f"({len(rows) - 50} further runs not shown; refine the query or pick a BioProject)")
+        idx = ui.choose_many("Select runs to use", [f"{r['Run']}  {r.get('SampleName', '')}" for r in rows])
+        chosen = [rows[i]["Run"] for i in idx]
+        if not chosen:
+            return False
+        ui.info(f"selected {len(chosen)} run(s)")
+        self._public_from_accessions(p, [(a, "run") for a in chosen], "sra")
+        return True
+
     def _public(self, p, kind):
         label = {"sra": "SRA run/experiment/study (SRR/SRX/SRP/PRJNA...)", "geo": "GEO series (GSE...)",
                  "ena": "ENA run/experiment/study (ERR/SRR/PRJEB/PRJNA...)"}[kind]
@@ -153,6 +285,9 @@ class App:
             raise ValueError("enter GEO series accessions (GSE...) for this option")
         if kind != "geo" and any(k.startswith("geo") for _, k in accs):
             raise ValueError("GEO accessions belong to option 2")
+        return self._public_from_accessions(p, accs, kind)
+
+    def _public_from_accessions(self, p, accs, kind):
         route = "sra" if kind == "sra" else self.cfg["download"]["source_preference"]
         ui.running("Retrieving metadata (ENA Portal / NCBI GEO)...")
         runs, titles = data_manager.resolve_public(accs, route)

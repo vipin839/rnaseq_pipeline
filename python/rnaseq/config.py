@@ -140,6 +140,11 @@ def validate(cfg, cores=None, ram_gb=None):
             errs.append(f"{key}.extra_args must be a list of strings")
     chk(V.number, cfg.get("min_overall_alignment_rate_fail"), "min_overall_alignment_rate_fail", 0, 100)
     chk(V.number, cfg.get("min_overall_alignment_rate_warn"), "min_overall_alignment_rate_warn", 0, 100)
+    n = cfg.get("ncbi") or {}
+    if not isinstance(n.get("email", ""), str) or not isinstance(n.get("api_key", ""), str):
+        errs.append("ncbi.email and ncbi.api_key must be strings")
+    elif n.get("email") and "@" not in n["email"]:
+        errs.append("ncbi.email must be an email address (or empty)")
     dl = cfg.get("download") or {}
     chk(V.positive_int, dl.get("max_reads", 0), "download.max_reads", 0)
     return errs

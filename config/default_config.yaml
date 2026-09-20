@@ -19,6 +19,14 @@ environment:
   r_env: rnaseq-r           # conda env holding R + DESeq2
   use_path_fallback: true   # if a tool is not in the env, look on $PATH
 
+# ---------------- NCBI access (searching GEO/SRA/taxonomy) ----------------
+# NCBI asks callers to identify themselves. An API key is optional and free
+# (https://www.ncbi.nlm.nih.gov/account/settings/): it raises the request limit
+# from 3/second to 10/second, which makes large searches faster.
+ncbi:
+  email: ""
+  api_key: ""
+
 # ---------------- Input data ----------------
 read_type: auto             # auto | paired | single  (auto = detect, then confirm; otherwise the data must match)
 import_mode: symlink        # symlink | copy   (local FASTQ import; symlink avoids duplication)
