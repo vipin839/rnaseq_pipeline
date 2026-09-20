@@ -42,7 +42,9 @@ but not fatal, `[ERROR]`/`[FAILED]` stopped, `[SKIPPED]` not needed (already val
      You then choose **Full data**, or a **Pilot subset** (the first N reads of each run) for testing only.
      Pilot runs carry a warning in the report and the manifest.
 4. **Reference.** Choose the organism and source (GENCODE, Ensembl, RefSeq, UCSC, a custom local FASTA + GTF,
-   or an existing prepared reference or index). The download URLs and sizes are shown. Nothing is downloaded until
+   or an existing prepared reference or index). For anything outside the catalog choose
+   **Search NCBI for ANY organism**: type a species, strain or taxid (it pre-fills the organism found in your
+   data), pick an assembly from the results, and the genome + GTF are downloaded from NCBI and MD5-verified. The download URLs and sizes are shown. Nothing is downloaded until
    the *Reference preparation* step, where you confirm again.
 5. **Optional databases.** GO/Reactome enrichment, off by default.
 6. **Samples.** Use all samples, or a subset (useful for debugging).

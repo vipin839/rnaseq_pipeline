@@ -11,6 +11,9 @@ just because an output file exists.
 * SRA: `prefetch` → `vdb-validate` (fails on corruption, exit ≠ 0) → `fasterq-dump --split-3 --skip-technical` in a
   temporary folder → `pigz`. Unpaired leftovers of paired runs are ignored and logged.
 * GEO: GSE → GSM (title, source, characteristics) → linked SRX → runs via ENA.
+* Discovery: NCBI E-utilities (`einfo` for searchable indexes, `esearch`/`esummary` for GEO series,
+  `efetch` runinfo for SRA runs). Searching uses Entrez; downloading uses ENA or the SRA toolkit.
+* If ENA has not mirrored a run (common for very recent studies) the SRA route is used automatically.
 * Local: symlink (default) or copy. Originals are never written to.
 * Pilot mode (`download.max_reads`) streams only the first N reads. It is for **testing only** and is flagged in the report and manifest.
 
@@ -62,6 +65,10 @@ Invalid trimmed output stops the pipeline.
   exceed chromosome lengths (this catches, for example, GRCh37 annotation on GRCh38), declared genome and annotation assemblies must agree, and the GTF
   header build must match. Any violation stops the stage unless the user typed `OVERRIDE` at selection, which is recorded.
 * `samtools faidx`, BED12 from the GTF (for RSeQC), `hisat2_extract_splice_sites.py`, `hisat2_extract_exons.py`.
+* **Annotations without exons** (bacteria; NCBI GTFs annotate genes as `CDS`): the feature-type counts are
+  shown and you are asked whether to count `CDS` instead. StringTie2 is then skipped, a plain HISAT2 index is
+  built (an empty splice-site file makes `hisat2-build` abort), alignment adds `--no-spliced-alignment`, and the
+  RSeQC BED12 is derived from the counted feature.
 * **HISAT2 index:** splice sites and exons are built into the index only when the estimated RAM (about 60 bytes per genome bp,
   roughly 160–200 GB for human) is available. Otherwise the plain index is built (about 8 GB for human) and the known splice
   sites are passed at alignment time with `--known-splicesite-infile`. This is standard practice with a small loss of sensitivity. The index is built in
