@@ -286,3 +286,48 @@ def test_bsd_sum_matches_coreutils(tmp_path):
     f = tmp_path / "x.bin"
     f.write_bytes(bytes(range(256)) * 50)
     assert reference_manager.bsd_sum(f) == reference_manager.bsd_sum_fast(f)
+
+
+# ---------------- bacterial / non-exon annotation ----------------
+BACT_GTF = (
+    'NC_1\tRefSeq\tgene\t1\t100\t.\t+\t.\tgene_id "b1";\n'
+    'NC_1\tRefSeq\tCDS\t1\t99\t.\t+\t0\tgene_id "b1"; transcript_id "t1";\n'
+    'NC_1\tRefSeq\tgene\t200\t300\t.\t-\t.\tgene_id "b2";\n'
+    'NC_1\tRefSeq\tCDS\t200\t299\t.\t-\t0\tgene_id "b2"; transcript_id "t2";\n'
+    'NC_1\tcmsearch\texon\t400\t450\t.\t+\t.\tgene_id "r1"; transcript_id "t3";\n')
+
+
+def test_bacterial_gtf_counts_cds(tmp_path):
+    f = tmp_path / "b.gtf"
+    f.write_text(BACT_GTF)
+    counts = reference_manager.feature_type_counts(f)
+    assert counts == {"gene": 2, "CDS": 2, "exon": 1}
+    alt, why = reference_manager.suggest_feature_type(counts, "exon")
+    assert alt == "CDS" and "CDS" in why
+    g = reference_manager.validate_gtf(f, "gene_id", "CDS")
+    assert g["genes"] == 2 and g["feature_type"] == "CDS"
+
+
+def test_exon_annotation_needs_no_switch(tmp_path):
+    f = tmp_path / "e.gtf"
+    f.write_text('c1\ts\tgene\t1\t100\t.\t+\t.\tgene_id "g1";\n'
+                 'c1\ts\texon\t1\t100\t.\t+\t.\tgene_id "g1"; transcript_id "t1";\n')
+    counts = reference_manager.feature_type_counts(f)
+    assert reference_manager.suggest_feature_type(counts, "exon") == (None, None)
+
+
+def test_wrong_feature_type_is_rejected(tmp_path):
+    f = tmp_path / "b.gtf"
+    f.write_text(BACT_GTF.replace('\texon\t', '\tmisc\t'))
+    with pytest.raises(PipelineError, match="no 'exon' features"):
+        reference_manager.validate_gtf(f, "gene_id", "exon")
+
+
+def test_ncbi_ftp_path_and_package():
+    assert reference_manager.ftp_dir("GCF_000013265.1", "ASM1326v1").endswith(
+        "/GCF/000/013/265/GCF_000013265.1_ASM1326v1")
+    pkg = reference_manager.ncbi_package({"accession": "GCF_000013265.1", "assembly_name": "ASM1326v1",
+                                          "organism": "Escherichia coli UTI89", "genome_bp": 5179971,
+                                          "annotation": "RS_2025"})
+    assert pkg["genome"]["url"].endswith("GCF_000013265.1_ASM1326v1_genomic.fna.gz")
+    assert pkg["annotation"]["url"].endswith("_genomic.gtf.gz") and pkg["checksum"]["type"] == "md5"

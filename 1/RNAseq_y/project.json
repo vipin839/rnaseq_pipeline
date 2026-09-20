@@ -1,0 +1,16 @@
+{
+  "project_id": "9db64b7a-9409-4648-8406-c9495990a04a",
+  "name": "y",
+  "created": "2026-09-20T10:31:49",
+  "pipeline_version": "1.0.0",
+  "data_source": null,
+  "accessions": [],
+  "samples": {},
+  "read_type": null,
+  "reference": null,
+  "strandedness": null,
+  "qc_decision": null,
+  "design": null,
+  "selected_samples": null,
+  "history": []
+}

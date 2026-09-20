@@ -24,8 +24,12 @@ def hisat2_command(project, sid, ref, cfg, threads, summary_file):
            "--summary-file", summary_file, "--rg-id", sid, "--rg", f"SM:{sid}"]
     if hp.get("dta", True):
         cmd.append("--dta")
-    if hp.get("use_known_splice_sites", True) and not ref.get("index_has_splice_sites") and ref.get("splice_sites"):
-        cmd += ["--known-splicesite-infile", ref["splice_sites"]]
+    ss = ref.get("splice_sites")
+    if (hp.get("use_known_splice_sites", True) and not ref.get("index_has_splice_sites") and ss
+            and Path(ss).exists() and Path(ss).stat().st_size > 0):
+        cmd += ["--known-splicesite-infile", ss]
+    elif ref.get("no_splice_sites"):
+        cmd.append("--no-spliced-alignment")  # genome without introns (e.g. bacteria)
     if r2:
         cmd += ["-1", r1, "-2", r2]
         if hp.get("no_mixed"):

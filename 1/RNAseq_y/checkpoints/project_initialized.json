@@ -1,0 +1,18 @@
+{
+  "stage": "project_initialized",
+  "completed_at": "2026-09-20T10:31:49",
+  "pipeline_version": "1.0.0",
+  "outputs": [
+    {
+      "path": "pipeline_manifest/system_information.txt",
+      "size": 592,
+      "mtime_ns": 1789900309626155951,
+      "sha256": "e5c82dc0df800def098b64c340e7e1d103e1d8b204b66a06e6bd7d993bca3c3d"
+    }
+  ],
+  "params": {
+    "name": "y"
+  },
+  "summary": {},
+  "depends_on": {}
+}

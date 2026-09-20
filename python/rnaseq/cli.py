@@ -1,6 +1,7 @@
 """Interactive terminal application: main menu, project wizard, resume/validate, dependencies, references."""
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -231,7 +232,12 @@ class App:
         org_default = orgs.index(pcfg["organism"]) if pcfg.get("organism") in orgs else \
             (len(orgs) if pcfg.get("organism") == "custom" else None)
         oi = ui.choose("Organism", [f"{k} ({v['scientific_name']})" for k, v in cat["organisms"].items()]
-                       + ["Custom organism (local genome FASTA + GTF)"], default=org_default)
+                       + ["Search NCBI for ANY organism (downloads genome + annotation)",
+                          "Custom organism (local genome FASTA + GTF)"], default=org_default)
+        if oi == len(orgs):
+            ref = self._ncbi_reference(p)
+            ref["store"] = str(reference_manager.store_dir(p.config(), ref))
+            return self._finish_reference(p, ref)
         if oi < len(orgs):
             org = orgs[oi]
             sci = cat["organisms"][org]["scientific_name"]
@@ -241,7 +247,8 @@ class App:
                     return self.select_reference(p)
         else:
             org = None
-        options = ["GENCODE", "Ensembl", "NCBI RefSeq", "UCSC", "Custom local genome + GTF", "Existing reference/index"]
+        options = ["GENCODE", "Ensembl", "NCBI RefSeq", "UCSC", "Custom local genome + GTF", "Existing reference/index",
+                   "Search NCBI for this organism"]
         src_key = {0: "gencode", 1: "ensembl", 2: "refseq", 3: "ucsc"}
         src_default = {"gencode": 0, "ensembl": 1, "refseq": 2, "ucsc": 3, "custom": 4, "existing": 5}.get(
             pcfg.get("reference_source"))
@@ -262,9 +269,14 @@ class App:
             self._show_package(pkg)
         elif si == 5:
             ref = self._existing_reference(org)
+        elif si == 6:
+            ref = self._ncbi_reference(p, cat["organisms"].get(org, {}).get("scientific_name", org))
         else:
             ref = self._custom_reference(org)
         ref["store"] = str(reference_manager.store_dir(p.config(), ref))
+        return self._finish_reference(p, ref)
+
+    def _finish_reference(self, p, ref):
         store_state = "prepared (will be revalidated)" if (Path(ref["store"]) / "reference_manifest.yaml").exists() \
             else "not yet prepared"
         ui.kv([("Reference", ref["label"]), ("Stored in", ref["store"]), ("Status", store_state)])
@@ -277,6 +289,49 @@ class App:
         p.state["reference"] = ref
         p.save()
         ui.ok(f"reference selected: {ref['label']}")
+
+    def _ncbi_reference(self, p, default_query=None):
+        """Search NCBI Datasets for any organism and build a downloadable reference package."""
+        default_query = default_query or p.state.get("organism_hint")
+        while True:
+            q = ui.ask("Organism name, strain or taxid (e.g. 'Escherichia coli UTI89', 'Danio rerio', 7955)",
+                       default=default_query)
+            ui.running(f"Searching NCBI assemblies for {q!r}...")
+            recs = reference_manager.search_ncbi(q, limit=8, reference_only=True)
+            if not recs:
+                recs = reference_manager.search_ncbi(q, limit=12, reference_only=False)
+            recs = [r for r in recs if r["annotation"]] or recs
+            recs.sort(key=lambda r: (not r["accession"].startswith("GCF"), r["level"] != "Complete Genome"))
+            if not recs:
+                ui.warn(f"no assemblies found for {q!r}")
+                if not ui.ask_yes_no("Search again?", default=True):
+                    raise UserAbort("no reference chosen")
+                continue
+            ui.section(f"NCBI ASSEMBLIES for {q!r}")
+            ui.table([(r["accession"], r["assembly_name"], r["organism"] + (f" ({r['strain']})" if r["strain"] else ""),
+                       r["level"], f"{r['genome_bp'] / 1e6:.1f}", r["annotation"] or "NO ANNOTATION")
+                      for r in recs],
+                     ["Accession", "Assembly", "Organism", "Level", "Mb", "Annotation"], max_col=42)
+            i = ui.choose("Which assembly?", [f"{r['accession']}  {r['assembly_name']}  {r['organism']}" for r in recs]
+                          + ["Search again"])
+            if i == len(recs):
+                default_query = q
+                continue
+            rec = recs[i]
+            if not rec["annotation"]:
+                ui.error("this assembly has no NCBI annotation (no GTF) — gene counting needs one")
+                continue
+            ui.running("Checking that the annotation file exists on the NCBI FTP site...")
+            if not reference_manager.annotation_available(rec):
+                ui.error("NCBI does not publish a GTF for this assembly; choose another one")
+                continue
+            pkg = reference_manager.ncbi_package(rec)
+            self._show_package(pkg)
+            return {"id": rec["accession"].replace(".", "_") + "_" + re.sub(r"[^A-Za-z0-9]", "", rec["assembly_name"]),
+                    "kind": "catalog", "package": pkg, "organism": rec["organism"], "source": pkg["source"],
+                    "assembly": rec["assembly_name"], "annotation_assembly": rec["assembly_name"],
+                    "annotation_release": pkg["annotation_release"], "accession": rec["accession"],
+                    "label": f"{rec['organism']} {rec['assembly_name']} ({rec['accession']})"}
 
     def _show_package(self, pkg):
         ui.section("REFERENCE PACKAGE")

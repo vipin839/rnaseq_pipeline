@@ -92,13 +92,14 @@ strandedness_inference:
 
 # ---------------- StringTie2 ----------------
 stringtie_parameters:
+  enabled: true                 # set false for bacteria/annotations without exon features
   reference_guided_only: true   # -e : quantify only reference transcripts (no novel assembly)
   ballgown_tables: false        # -B
   extra_args: []
 
 # ---------------- featureCounts ----------------
 featurecounts_parameters:
-  feature_type: exon            # -t
+  feature_type: exon            # -t ; use CDS for bacterial NCBI GTFs (genes are CDS, not exon)
   attribute: gene_id            # -g
   count_multimapping: false     # -M
   fractional: false             # --fraction

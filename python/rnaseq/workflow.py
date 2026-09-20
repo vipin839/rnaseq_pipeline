@@ -202,6 +202,11 @@ class DataStage(Stage):
             if rec.get("r1") and p.abs(rec["r1"]).exists():
                 continue
             try:
+                files = (rec.get("download") or {}).get("files") or []
+                if rec["source"] == "ena" and not files:
+                    ui.info(f"{sid}: ENA has no mirrored FASTQ for this run; using the NCBI SRA route instead")
+                    rec["source"] = "sra"
+                    p.save()
                 if rec["source"] == "sra":
                     r1, r2 = sra_manager.download_run(rec["accession"], p.path("data", "raw"), p.path("data", "fastq"),
                                                       p.path("temp"), ctx.threads, rec["layout"] == "PAIRED",
@@ -465,8 +470,27 @@ class ReferenceStage(Stage):
         fa = reference_manager.validate_fasta(paths.genome)
         ui.ok(f"FASTA valid: {fa['n_sequences']} sequences, {fa['total_bp']:,} bp")
         ui.running("Validating GTF")
-        gtf = reference_manager.validate_gtf(paths.gtf, ctx.cfg["featurecounts_parameters"]["attribute"])
-        ui.ok(f"GTF valid: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} exons")
+        ftype = ctx.cfg["featurecounts_parameters"]["feature_type"]
+        counts = reference_manager.feature_type_counts(paths.gtf)
+        alt, why = reference_manager.suggest_feature_type(counts, ftype)
+        if alt:
+            ui.warn(why)
+            ui.info(f"counting '{ftype}' would miss most genes in this annotation")
+            if ui.ask_yes_no(f"Count '{alt}' features instead (and skip StringTie2, which needs exons)?",
+                             default=True):
+                ftype = alt
+                ctx.cfg["featurecounts_parameters"]["feature_type"] = alt
+                if counts.get("exon", 0) < counts.get("gene", 0) * 0.5:
+                    ctx.cfg["stringtie_parameters"]["enabled"] = False
+                ctx.project.save_config(ctx.cfg)
+                ui.ok(f"configuration updated: feature_type={alt}"
+                      + (", StringTie2 disabled" if not ctx.cfg["stringtie_parameters"].get("enabled", True) else ""))
+        gtf = reference_manager.validate_gtf(paths.gtf, ctx.cfg["featurecounts_parameters"]["attribute"], ftype)
+        ui.ok(f"GTF valid: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, "
+              f"{gtf['exons']:,} {ftype} features")
+        if "exon" not in gtf["feature_types"]:
+            ui.info("no 'exon' features (typical for bacterial annotation): HISAT2 will align without splice "
+                    "sites and StringTie2 transcript quantification is not meaningful")
         errors, warns = reference_manager.check_compatibility(fa, gtf, r.get("assembly"),
                                                               r.get("annotation_assembly", r.get("assembly")))
         for w in warns:
@@ -480,8 +504,9 @@ class ReferenceStage(Stage):
             ui.warn("compatibility errors OVERRIDDEN by user (recorded in manifest)")
         ui.ok("genome/annotation compatibility checks passed")
         runner.run(["samtools", "faidx", paths.genome], stage=self.key, log_file=log, description="Indexing FASTA")
-        n_tx = reference_manager.gtf_to_bed12(paths.gtf, paths.bed12)
-        ui.ok(f"BED12 written for strandedness inference ({n_tx:,} transcripts)")
+        bed_feature = ftype if counts.get("exon", 0) < counts.get("gene", 0) * 0.9 else "exon"
+        n_tx = reference_manager.gtf_to_bed12(paths.gtf, paths.bed12, bed_feature)
+        ui.ok(f"BED12 written for strandedness inference ({n_tx:,} {bed_feature} features)")
         setting = ctx.cfg["hisat2_build"]["use_splice_sites_in_index"]
         need_ss = reference_manager.index_ram_needed_gb(fa["total_bp"], True)
         use_ss = (need_ss <= ctx.sysinfo["ram_available_gb"] * 0.9) if setting == "auto" else bool(setting)
@@ -513,7 +538,8 @@ class ReferenceStage(Stage):
             "files": record, "genome": {"path": str(paths.genome), "sequences": fa["n_sequences"],
                                         "total_bp": fa["total_bp"]},
             "annotation": {"path": str(paths.gtf), "genes": gtf["genes"], "transcripts": gtf["transcripts"],
-                           "exons": gtf["exons"], "header_build": gtf["header_build"]},
+                           "counted_features": gtf["exons"], "feature_type": ftype,
+                           "feature_types": gtf["feature_types"], "header_build": gtf["header_build"]},
             "index": {"prefix": str(paths.index_prefix), "status": "valid", "splice_sites_in_index": use_ss,
                       "splice_sites_file": str(paths.splice_sites), "exons_file": str(paths.exons)},
             "compatibility": {"errors": errors, "warnings": warns,
@@ -530,6 +556,7 @@ class ReferenceStage(Stage):
             f"Annotation: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} exons\n"
             f"HISAT2 index: {paths.index_prefix} (splice sites in index: {use_ss})\n")
         r.update({"index_prefix": str(paths.index_prefix), "index_has_splice_sites": use_ss,
+                  "no_splice_sites": paths.splice_sites.exists() and paths.splice_sites.stat().st_size == 0,
                   "splice_sites": str(paths.splice_sites), "gtf": str(paths.gtf), "bed12": str(paths.bed12),
                   "genes": gtf["genes"], "genome_bp": fa["total_bp"]})
         ctx.project.save()
@@ -748,6 +775,13 @@ class StringTieStage(Stage):
 
     def execute(self, ctx):
         p = ctx.project
+        if not ctx.cfg["stringtie_parameters"].get("enabled", True):
+            note = p.path("stringtie", "SKIPPED.txt")
+            note.write_text("StringTie2 was disabled in the configuration "
+                            "(stringtie_parameters.enabled: false).\n"
+                            "Gene counts for DESeq2 come from featureCounts and are unaffected.\n")
+            ui.skipped("StringTie2 disabled in configuration")
+            return [note], {"samples": ctx.samples, "enabled": False}, {"enabled": False}
         strand = (p.state.get("strandedness") or {}).get("value", "unstranded")
         outs, failures = [], {}
         for sid in ctx.samples:

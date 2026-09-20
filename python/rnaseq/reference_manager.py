@@ -121,7 +121,7 @@ def validate_fasta(path, fai_path=None):
 ATTR_RE = re.compile(r'(\S+)\s+"([^"]*)"')
 
 
-def validate_gtf(path, attribute="gene_id"):
+def validate_gtf(path, attribute="gene_id", feature_type="exon"):
     path = Path(path)
     if not path.exists() or path.stat().st_size == 0:
         raise PipelineError(f"annotation GTF missing or empty: {path}", stage="reference")
@@ -157,19 +157,23 @@ def validate_gtf(path, attribute="gene_id"):
             features[ftype] = features.get(ftype, 0) + 1
             if e > seq_max_end.get(seq, 0):
                 seq_max_end[seq] = e
-            if ftype == "exon":
+            if ftype == feature_type:
                 exons += 1
                 a = dict(ATTR_RE.findall(attrs))
-                if attribute not in a or "transcript_id" not in a:
+                if attribute not in a:
                     missing_attr += 1
                     continue
                 genes.add(a[attribute])
-                transcripts.add(a["transcript_id"])
+                if "transcript_id" in a:
+                    transcripts.add(a["transcript_id"])
     if exons == 0:
-        raise PipelineError("GTF contains no 'exon' features", stage="reference",
-                            cause="featureCounts/StringTie need exon records")
+        raise PipelineError(f"GTF contains no '{feature_type}' features", stage="reference",
+                            cause="featureCounts counts this feature type "
+                                  "(bacterial NCBI GTFs annotate genes as CDS, not exon)",
+                            remedy=f"set featurecounts_parameters.feature_type to a type present in the GTF "
+                                   f"(found: {', '.join(sorted(features)) or 'none'})")
     if missing_attr > exons * 0.01:
-        raise PipelineError(f"{missing_attr} exon lines lack {attribute}/transcript_id", stage="reference",
+        raise PipelineError(f"{missing_attr} {feature_type} lines lack {attribute}/transcript_id", stage="reference",
                             remedy="choose a standard GTF (GENCODE/Ensembl/UCSC)")
     build = None
     for h in header:
@@ -179,7 +183,7 @@ def validate_gtf(path, attribute="gene_id"):
             break
     return {"seqnames": sorted(seq_max_end), "seq_max_end": seq_max_end, "genes": len(genes),
             "transcripts": len(transcripts), "exons": exons, "feature_types": features,
-            "header_build": build, "attribute": attribute}
+            "header_build": build, "attribute": attribute, "feature_type": feature_type}
 
 
 def check_compatibility(fa, gtf, genome_assembly=None, annotation_assembly=None):
@@ -360,7 +364,11 @@ def build_index(paths, fa_info, threads, mem_gb, use_ss, log_file, extra_args=()
     runner.run(["hisat2_extract_exons.py", paths.gtf], stage="reference", stdout_file=paths.exons,
                log_file=log_file, description="Extracting exons from GTF")
     if not runner.DRY_RUN and paths.splice_sites.stat().st_size == 0:
-        ui.warn("no splice sites extracted (single-exon annotation?)")
+        ui.warn("no splice sites in this annotation (normal for bacteria / single-exon genomes)")
+        if use_ss:
+            # hisat2-build aborts on an empty --ss file; a plain index is correct when there are no introns
+            ui.info("building a plain HISAT2 index (no --ss/--exon)")
+            use_ss = False
     tmp = paths.index_dir.with_name("index.building")
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -389,17 +397,18 @@ def index_ram_needed_gb(genome_bp, use_ss):
     return genome_bp * (60 if use_ss else 2.8) / 1e9 + 0.5
 
 
-def gtf_to_bed12(gtf, bed):
-    """Convert GTF transcripts to BED12 (for RSeQC infer_experiment)."""
+def gtf_to_bed12(gtf, bed, feature_type="exon"):
+    """Convert GTF features to BED12 (for RSeQC infer_experiment). For annotations without exons
+    (bacteria) the counting feature (CDS) is used instead, keyed by gene."""
     tx = {}
     with open(gtf, encoding="utf-8", errors="replace") as f:
         for line in f:
             if line.startswith("#"):
                 continue
             c = line.rstrip("\n").split("\t")
-            if len(c) != 9 or c[2] != "exon":
+            if len(c) != 9 or c[2] != feature_type:
                 continue
-            m = re.search(r'transcript_id "([^"]+)"', c[8])
+            m = re.search(r'transcript_id "([^"]+)"', c[8]) or re.search(r'gene_id "([^"]+)"', c[8])
             if not m:
                 continue
             t = tx.setdefault(m.group(1), [c[0], c[6], []])
@@ -442,3 +451,103 @@ def link_into_project(project, paths):
             dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.symlink_to(Path(src).resolve())
+
+
+# ------------------------------ NCBI assembly search (any organism) ------------------------------
+
+DATASETS_API = "https://api.ncbi.nlm.nih.gov/datasets/v2alpha/genome"
+NCBI_FTP = "https://ftp.ncbi.nlm.nih.gov/genomes/all"
+
+
+def ftp_dir(accession, assembly_name):
+    """https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/013/265/GCF_000013265.1_ASM1326v1"""
+    prefix, digits = accession.split("_", 1)
+    num = digits.split(".")[0]
+    parts = [num[i:i + 3] for i in range(0, 9, 3)]
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", assembly_name)
+    return f"{NCBI_FTP}/{prefix}/{parts[0]}/{parts[1]}/{parts[2]}/{accession}_{safe_name}"
+
+
+def search_ncbi(query, limit=10, reference_only=True):
+    """Search NCBI Datasets for assemblies of an organism (name or taxid). Returns display records."""
+    import json as _json
+    import urllib.parse
+    q = urllib.parse.quote(str(query).strip())
+    url = (f"{DATASETS_API}/taxon/{q}/dataset_report?page_size={limit}"
+           f"&filters.assembly_version=current" + ("&filters.reference_only=true" if reference_only else ""))
+    text = net.get_text(url)
+    try:
+        data = _json.loads(text)
+    except ValueError:
+        raise PipelineError(f"unexpected response from NCBI Datasets for {query!r}")
+    out = []
+    for r in data.get("reports", []):
+        info = r.get("assembly_info", {})
+        ann = r.get("annotation_info") or {}
+        stats = r.get("assembly_stats", {}) or {}
+        acc, name = r.get("accession", ""), info.get("assembly_name", "")
+        if not acc or not name:
+            continue
+        out.append({
+            "accession": acc, "assembly_name": name,
+            "organism": r.get("organism", {}).get("organism_name", ""),
+            "strain": (r.get("organism", {}).get("infraspecific_names") or {}).get("strain", ""),
+            "level": info.get("assembly_level", ""), "annotation": ann.get("name", ""),
+            "annotation_date": ann.get("release_date", ""),
+            "genome_bp": int(stats.get("total_sequence_length") or 0),
+            "refseq_category": info.get("refseq_category", ""),
+            "ftp": ftp_dir(acc, name),
+        })
+    return out
+
+
+def ncbi_package(rec):
+    """Turn a search result into a catalog-style package (same shape as config/reference_catalog.yaml)."""
+    ftp = rec.get("ftp") or ftp_dir(rec["accession"], rec["assembly_name"])
+    base = f"{ftp}/{rec['accession']}_{re.sub(r'[^A-Za-z0-9._-]', '_', rec['assembly_name'])}"
+    gb = max(0.001, rec["genome_bp"] / 1e9 * 0.3)  # gzipped FASTA is roughly 0.3 bytes per base
+    return {
+        "organism": rec["organism"], "source": "refseq" if rec["accession"].startswith("GCF") else "genbank",
+        "assembly": rec["assembly_name"], "annotation_release": rec["annotation"] or rec["accession"],
+        "genome": {"url": f"{base}_genomic.fna.gz", "approx_size_gb": round(gb, 3)},
+        "annotation": {"url": f"{base}_genomic.gtf.gz", "approx_size_gb": round(gb * 0.06, 3)},
+        "checksum": {"type": "md5", "url": f"{ftp}/md5checksums.txt"},
+        "index_approx_size_gb": round(max(0.02, rec["genome_bp"] / 1e9 * 1.5), 2),
+        "genome_size_bp": rec["genome_bp"],
+    }
+
+
+def annotation_available(rec):
+    """HEAD the GTF: not every assembly has one."""
+    pkg = ncbi_package(rec)
+    out = runner.tool_output(["curl", "-sIL", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "25",
+                              pkg["annotation"]["url"]], timeout=60)
+    return (out or "").strip().endswith("200")
+
+
+def feature_type_counts(path):
+    """Fast scan of GTF column 3 -> {feature_type: count} (used to detect bacterial CDS-only annotation)."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    counts = {}
+    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            cols = line.split("\t", 4)
+            if len(cols) > 2:
+                counts[cols[2]] = counts.get(cols[2], 0) + 1
+    return counts
+
+
+def suggest_feature_type(counts, configured):
+    """Return (suggested_type, reason) when the configured type is clearly wrong for this annotation."""
+    have = counts.get(configured, 0)
+    genes = counts.get("gene", 0)
+    # a usable counting feature occurs at least about once per gene (eukaryotes: many exons per gene)
+    if have and (not genes or have >= 0.9 * genes):
+        return None, None
+    for alt in ("CDS", "exon", "transcript"):
+        if alt != configured and counts.get(alt, 0) >= max(1, 0.5 * genes):
+            return alt, (f"annotation has {have:,} '{configured}' but {counts[alt]:,} '{alt}' features "
+                         f"for {genes:,} genes (typical of bacterial/NCBI annotation)")
+    return None, None
