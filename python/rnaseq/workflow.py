@@ -459,106 +459,38 @@ class ReferenceStage(Stage):
 
     def execute(self, ctx):
         r = ctx.ref()
-        paths = reference_manager.RefPaths(r["store"])
         log = ctx.log("reference")
-        record = reference_manager.acquire(r, paths, log)
+
+        def on_feature_type(alt, why, counts):
+            if not ui.ask_yes_no(f"Count '{alt}' features instead (and skip StringTie2, which needs exons)?",
+                                 default=True):
+                return False
+            ctx.cfg["featurecounts_parameters"]["feature_type"] = alt
+            if counts.get("exon", 0) < counts.get("gene", 0) * 0.5:
+                ctx.cfg["stringtie_parameters"]["enabled"] = False
+            ctx.project.save_config(ctx.cfg)
+            ui.ok(f"configuration updated: feature_type={alt}"
+                  + (", StringTie2 disabled" if not ctx.cfg["stringtie_parameters"].get("enabled", True) else ""))
+            return True
+
+        manifest, info = reference_manager.prepare(
+            r, ctx.cfg, ctx.threads, ctx.mem_gb, ctx.sysinfo["ram_available_gb"], log,
+            on_feature_type=on_feature_type,
+            confirm_ram=lambda need, avail: ui.ask_yes_no("Attempt the index build anyway?", default=False),
+            dry_run=ctx.dry_run)
         if ctx.dry_run:
-            use_ss = False
-            reference_manager.build_index(paths, {"names": []}, ctx.threads, ctx.mem_gb, use_ss, log)
             return [], {}, {}
-        ui.running("Validating genome FASTA (streaming)")
-        fa = reference_manager.validate_fasta(paths.genome)
-        ui.ok(f"FASTA valid: {fa['n_sequences']} sequences, {fa['total_bp']:,} bp")
-        ui.running("Validating GTF")
-        ftype = ctx.cfg["featurecounts_parameters"]["feature_type"]
-        counts = reference_manager.feature_type_counts(paths.gtf)
-        alt, why = reference_manager.suggest_feature_type(counts, ftype)
-        if alt:
-            ui.warn(why)
-            ui.info(f"counting '{ftype}' would miss most genes in this annotation")
-            if ui.ask_yes_no(f"Count '{alt}' features instead (and skip StringTie2, which needs exons)?",
-                             default=True):
-                ftype = alt
-                ctx.cfg["featurecounts_parameters"]["feature_type"] = alt
-                if counts.get("exon", 0) < counts.get("gene", 0) * 0.5:
-                    ctx.cfg["stringtie_parameters"]["enabled"] = False
-                ctx.project.save_config(ctx.cfg)
-                ui.ok(f"configuration updated: feature_type={alt}"
-                      + (", StringTie2 disabled" if not ctx.cfg["stringtie_parameters"].get("enabled", True) else ""))
-        gtf = reference_manager.validate_gtf(paths.gtf, ctx.cfg["featurecounts_parameters"]["attribute"], ftype)
-        ui.ok(f"GTF valid: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, "
-              f"{gtf['exons']:,} {ftype} features")
-        if "exon" not in gtf["feature_types"]:
-            ui.info("no 'exon' features (typical for bacterial annotation): HISAT2 will align without splice "
-                    "sites and StringTie2 transcript quantification is not meaningful")
-        errors, warns = reference_manager.check_compatibility(fa, gtf, r.get("assembly"),
-                                                              r.get("annotation_assembly", r.get("assembly")))
-        for w in warns:
-            ui.warn(w)
-        if errors:
-            for e in errors:
-                ui.error(e)
-            if not r.get("override_compatibility"):
-                raise PipelineError("genome and annotation are not compatible", stage=self.key,
-                                    remedy="select a matching genome/annotation pair (same assembly and provider)")
-            ui.warn("compatibility errors OVERRIDDEN by user (recorded in manifest)")
-        ui.ok("genome/annotation compatibility checks passed")
-        runner.run(["samtools", "faidx", paths.genome], stage=self.key, log_file=log, description="Indexing FASTA")
-        bed_feature = ftype if counts.get("exon", 0) < counts.get("gene", 0) * 0.9 else "exon"
-        n_tx = reference_manager.gtf_to_bed12(paths.gtf, paths.bed12, bed_feature)
-        ui.ok(f"BED12 written for strandedness inference ({n_tx:,} {bed_feature} features)")
-        setting = ctx.cfg["hisat2_build"]["use_splice_sites_in_index"]
-        need_ss = reference_manager.index_ram_needed_gb(fa["total_bp"], True)
-        use_ss = (need_ss <= ctx.sysinfo["ram_available_gb"] * 0.9) if setting == "auto" else bool(setting)
-        ok, why = reference_manager.index_valid(paths.index_prefix, fa["names"])
-        manifest_prev = C.load_yaml(paths.manifest) if paths.manifest.exists() else {}
-        if ok and paths.splice_sites.exists():
-            use_ss = bool(manifest_prev.get("index", {}).get("splice_sites_in_index", False))
-            ui.skipped(f"existing HISAT2 index is valid ({why}); not rebuilding")
-        else:
-            need = reference_manager.index_ram_needed_gb(fa["total_bp"], use_ss)
-            ui.info(f"HISAT2 index build: splice sites in index = {use_ss} (est. RAM {need:.1f} GB; "
-                    f"available {ctx.sysinfo['ram_available_gb']} GB)")
-            if not use_ss:
-                ui.info("known splice sites will be supplied at alignment time (--known-splicesite-infile)")
-            if need > ctx.sysinfo["ram_available_gb"]:
-                ui.warn("estimated RAM exceeds available memory; the build may fail or swap heavily")
-                if not ui.ask_yes_no("Attempt the index build anyway?", default=False):
-                    raise UserAbort("index build cancelled")
-            reference_manager.build_index(paths, fa, ctx.threads, ctx.mem_gb, use_ss, log,
-                                          ctx.cfg["hisat2_build"].get("extra_args", []))
-            ok, why = reference_manager.index_valid(paths.index_prefix, fa["names"])
-            if not ok:
-                raise PipelineError(f"HISAT2 index invalid after build: {why}", stage=self.key)
-            ui.ok(f"HISAT2 index built and validated ({why})")
-        manifest = {
-            "organism": r.get("organism"), "source": r.get("source"), "genome_assembly": r.get("assembly"),
-            "annotation_assembly": r.get("annotation_assembly", r.get("assembly")),
-            "annotation_release": r.get("annotation_release"), "label": r.get("label"),
-            "files": record, "genome": {"path": str(paths.genome), "sequences": fa["n_sequences"],
-                                        "total_bp": fa["total_bp"]},
-            "annotation": {"path": str(paths.gtf), "genes": gtf["genes"], "transcripts": gtf["transcripts"],
-                           "counted_features": gtf["exons"], "feature_type": ftype,
-                           "feature_types": gtf["feature_types"], "header_build": gtf["header_build"]},
-            "index": {"prefix": str(paths.index_prefix), "status": "valid", "splice_sites_in_index": use_ss,
-                      "splice_sites_file": str(paths.splice_sites), "exons_file": str(paths.exons)},
-            "compatibility": {"errors": errors, "warnings": warns,
-                              "override": bool(r.get("override_compatibility"))},
-            "store": str(paths.base),
-        }
-        reference_manager.write_manifest(paths.manifest, manifest)
+        paths, fa, gtf = info["paths"], info["fa"], info["gtf"]
         proj_manifest = ctx.project.path("reference", "reference_manifest.yaml")
         reference_manager.write_manifest(proj_manifest, manifest)
         reference_manager.link_into_project(ctx.project, paths)
         summary_txt = ctx.project.path("reference", "reference_summary.txt")
         summary_txt.write_text(
             f"Reference: {r.get('label')}\nGenome: {fa['n_sequences']} sequences, {fa['total_bp']:,} bp\n"
-            f"Annotation: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} exons\n"
-            f"HISAT2 index: {paths.index_prefix} (splice sites in index: {use_ss})\n")
-        r.update({"index_prefix": str(paths.index_prefix), "index_has_splice_sites": use_ss,
-                  "no_splice_sites": paths.splice_sites.exists() and paths.splice_sites.stat().st_size == 0,
-                  "splice_sites": str(paths.splice_sites), "gtf": str(paths.gtf), "bed12": str(paths.bed12),
-                  "genes": gtf["genes"], "genome_bp": fa["total_bp"]})
+            f"Annotation: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, "
+            f"{gtf['exons']:,} {info['feature_type']} features\n"
+            f"HISAT2 index: {paths.index_prefix} (splice sites in index: {info['use_ss']})\n")
+        r.update(info["state"])
         ctx.project.save()
         outs = [proj_manifest, summary_txt, paths.gtf, paths.splice_sites, paths.bed12,
                 *reference_manager.index_files(paths.index_prefix)]

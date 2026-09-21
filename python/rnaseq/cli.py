@@ -365,7 +365,7 @@ class App:
         orgs = list(cat["organisms"])
         pcfg = p.config()
         org_default = orgs.index(pcfg["organism"]) if pcfg.get("organism") in orgs else \
-            (len(orgs) if pcfg.get("organism") == "custom" else None)
+            (len(orgs) + 1 if pcfg.get("organism") == "custom" else None)
         oi = ui.choose("Organism", [f"{k} ({v['scientific_name']})" for k, v in cat["organisms"].items()]
                        + ["Search NCBI for ANY organism (downloads genome + annotation)",
                           "Custom organism (local genome FASTA + GTF)"], default=org_default)
@@ -480,7 +480,11 @@ class App:
     def _custom_reference(self, org):
         fasta = ui.ask("Genome FASTA (.fa/.fasta[.gz])", validator=lambda v: str(V.existing_file(v)))
         gtf = ui.ask("Annotation GTF (.gtf[.gz])", validator=lambda v: str(V.existing_file(v)))
-        organism = org or ui.ask("Organism name (e.g. Arabidopsis_thaliana)", validator=V.project_name)
+        return self._describe_custom(fasta, gtf, org)
+
+    def _describe_custom(self, fasta, gtf, org, default_name=None):
+        organism = org or ui.ask("Organism name (e.g. Arabidopsis_thaliana)", default=default_name,
+                                 validator=V.project_name)
         ga = ui.ask("Genome assembly name (e.g. TAIR10)", validator=V.project_name)
         aa = ui.ask("Assembly the annotation was made for", default=ga, validator=V.project_name)
         rel = ui.ask("Annotation release/version", default="unknown")
@@ -497,24 +501,41 @@ class App:
                "override_compatibility": override}
         return ref
 
-    def _existing_reference(self, org):
-        store = Path(os.path.expanduser(self.cfg["reference_store"]))
-        found = sorted(d for d in store.glob("*") if (d / "reference_manifest.yaml").exists()) if store.exists() else []
-        opts = [f"{d.name}: {C.load_yaml(d / 'reference_manifest.yaml').get('label')}" for d in found]
-        i = ui.choose("Prepared references in the shared store", opts + ["Other: give index prefix + FASTA + GTF"])
+    def _existing_reference(self, org, store_root=None):
+        """Offer references already on disk: prepared ones (with a manifest) and plain FASTA+GTF folders."""
+        store = Path(os.path.expanduser(store_root or self.cfg["reference_store"]))
+        found = reference_manager.scan_store(store)
+        labels = [f"[{'ready' if f['indexed'] else 'needs index'}] {f['label']}" for f in found]
+        if not found:
+            ui.info(f"no references found in {store}")
+        i = ui.choose(f"References already on disk ({store})",
+                      labels + ["Look in another folder", "Give paths manually (FASTA + GTF, optional index)"])
+        if i == len(found):
+            other = ui.ask("Folder to scan", validator=lambda v: str(V.existing_dir(v)))
+            return self._existing_reference(org, other)
         if i < len(found):
-            m = C.load_yaml(found[i] / "reference_manifest.yaml")
-            ref = {"id": found[i].name, "kind": "existing", "organism": m.get("organism"), "source": m.get("source"),
-                   "assembly": m.get("genome_assembly"), "annotation_assembly": m.get("annotation_assembly"),
-                   "annotation_release": m.get("annotation_release"), "label": m.get("label")}
-            ref["fasta"] = m["genome"]["path"]
-            ref["gtf"] = m["annotation"]["path"]
-            return ref
+            f = found[i]
+            if f["kind"] == "prepared":
+                m = f["manifest"]
+                return {"id": f["dir"].name, "kind": "existing", "organism": m.get("organism"),
+                        "source": m.get("source"), "assembly": m.get("genome_assembly"),
+                        "annotation_assembly": m.get("annotation_assembly"),
+                        "annotation_release": m.get("annotation_release"), "label": m.get("label"),
+                        "fasta": m["genome"]["path"], "gtf": m["annotation"]["path"]}
+            fasta, gtf = f["fasta"], f["gtf"]
+            if len(f.get("fastas", [])) > 1:
+                fasta = f["fastas"][ui.choose("Which genome FASTA?", [x.name for x in f["fastas"]])]
+            if len(f.get("gtfs", [])) > 1:
+                gtf = f["gtfs"][ui.choose("Which annotation GTF?", [x.name for x in f["gtfs"]])]
+            ui.info(f"using {fasta.name} + {gtf.name} from {f['dir']}")
+            return self._describe_custom(str(fasta), str(gtf), org, default_name=f["dir"].name)
         ref = self._custom_reference(org)
-        prefix = ui.ask("HISAT2 index prefix (path without .1.ht2)",
-                        validator=lambda v: v if reference_manager.index_files(Path(os.path.expanduser(v)))
+        prefix = ui.ask("HISAT2 index prefix (path without .1.ht2), or blank to build one",
+                        allow_empty=True, default="",
+                        validator=lambda v: v if not v or reference_manager.index_files(Path(os.path.expanduser(v)))
                         else (_ for _ in ()).throw(ValueError("no .1.ht2 ... .8.ht2 files found for this prefix")))
-        ref["external_index"] = str(Path(os.path.expanduser(prefix)).resolve())
+        if prefix:
+            ref["external_index"] = str(Path(os.path.expanduser(prefix)).resolve())
         return ref
 
     def optional_databases(self, p):
@@ -771,13 +792,94 @@ class App:
             size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file() and not f.is_symlink()) / 1e9
             rows.append((d.name, man.get("label", "(incomplete)"), idx, f"{size:.1f}"))
         ui.table(rows, ["ID", "Label", "HISAT2 index", "GB"])
-        c = ui.choose("OPTIONS", ["Select/change the reference of a project", "Return"])
+        c = ui.choose("OPTIONS", ["Download and prepare a reference now (no project needed)",
+                                  "Select/change the reference of a project",
+                                  "Delete a prepared reference from the store", "Return"])
         if c == 0:
+            self.prepare_reference_now()
+        elif c == 1:
             p = self.open_project(self.pick_project())
             try:
                 self.select_reference(p)
             finally:
                 p.unlock()
+        elif c == 2:
+            self.delete_reference()
+
+    def prepare_reference_now(self):
+        """Download + validate + index a reference into the shared store, without creating a project."""
+        cat = C.load_catalog()
+        orgs = list(cat["organisms"])
+        oi = ui.choose("Organism", [f"{k} ({v['scientific_name']})" for k, v in cat["organisms"].items()]
+                       + ["Search NCBI for ANY organism", "Custom (local genome FASTA + GTF)"])
+        if oi == len(orgs):
+            ref = self._ncbi_reference_standalone()
+        elif oi == len(orgs) + 1:
+            ref = self._custom_reference(None)
+        else:
+            org = orgs[oi]
+            pk = reference_manager.packages_for(cat, org)
+            keys = list(pk)
+            ki = ui.choose("Available packages",
+                           [f"{k}: {v['assembly']} / {v['annotation_release']} ({v['source']})"
+                            for k, v in pk.items()])
+            pkg = pk[keys[ki]]
+            self._show_package(pkg)
+            ref = {"id": keys[ki], "kind": "catalog", "package": pkg, "organism": org, "source": pkg["source"],
+                   "assembly": pkg["assembly"], "annotation_assembly": pkg["assembly"],
+                   "annotation_release": pkg["annotation_release"],
+                   "label": f"{pkg['assembly']} / {pkg['annotation_release']}"}
+        ref["store"] = str(reference_manager.store_dir(self.cfg, ref))
+        info = self.sysinfo(ref["store"])
+        est = storage.estimate(None, "reference_ready", [], ref.get("package")) if ref.get("package") else 2.0
+        ui.kv([("Reference", ref["label"]), ("Store", ref["store"]),
+               ("Estimated storage", f"{est:.1f} GB"), ("Free disk", f"{info['disk_free_gb']} GB"),
+               ("Threads", C.resolve_threads(self.cfg, info["cpu_cores"])), ("RAM", f"{info['ram_total_gb']} GB")])
+        if not ui.ask_yes_no("Download and prepare it now? (this can take a long time for large genomes)",
+                             default=True):
+            return
+        log_dir = Path.home() / ".rnaseq_pipeline"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        cfg = C.deep_merge(self.cfg, {})
+        manifest, prepared = reference_manager.prepare(
+            ref, cfg, C.resolve_threads(cfg, info["cpu_cores"]),
+            C.resolve_memory_gb(cfg, info["ram_total_gb"]), info["ram_available_gb"],
+            log_dir / "reference_prepare.log",
+            on_feature_type=lambda alt, why, counts: ui.ask_yes_no(
+                f"Count '{alt}' features instead? (recorded in this reference's manifest)", default=True),
+            confirm_ram=lambda need, avail: ui.ask_yes_no("Attempt the index build anyway?", default=False))
+        ui.ok(f"reference ready: {ref['label']}")
+        ui.info(f"stored in {ref['store']} — projects can now pick it under "
+                "'Existing reference/index' without downloading again")
+
+    def _ncbi_reference_standalone(self):
+        class _Stub:
+            state = {}
+
+            @staticmethod
+            def config():
+                return self.cfg
+        return self._ncbi_reference(_Stub())
+
+    def delete_reference(self):
+        store = Path(os.path.expanduser(self.cfg["reference_store"]))
+        found = reference_manager.scan_store(store)
+        if not found:
+            ui.info(f"no prepared references in {store}")
+            return
+        sizes = [sum(f.stat().st_size for f in r["dir"].rglob("*") if f.is_file() and not f.is_symlink()) / 1e9
+                 for r in found]
+        i = ui.choose("Which reference should be deleted?",
+                      [f"{r['label']}  ({s:.1f} GB)  {r['dir']}" for r, s in zip(found, sizes)] + ["Cancel"])
+        if i >= len(found):
+            return
+        target = found[i]["dir"]
+        ui.warn(f"this permanently deletes {target} ({sizes[i]:.1f} GB). Projects using it will re-download.")
+        if ui.ask(f"Type the folder name '{target.name}' to confirm", allow_empty=True, default="") != target.name:
+            ui.info("cancelled")
+            return
+        shutil.rmtree(target)
+        ui.ok(f"removed {target}")
 
     # ------------------------------------------------------------------ 6. reports
     def view_reports(self):

@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.py text eol=lf
+*.R text eol=lf
+*.sh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+rnaseq_pipeline text eol=lf
+*.gz binary

@@ -7,7 +7,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from . import PipelineError, net, runner, ui
+from . import PipelineError, UserAbort, net, runner, ui
 from . import config as C
 
 IUPAC = b"ACGTNacgtnRYKMSWBDHVrykmswbdhv-*"
@@ -551,3 +551,129 @@ def suggest_feature_type(counts, configured):
             return alt, (f"annotation has {have:,} '{configured}' but {counts[alt]:,} '{alt}' features "
                          f"for {genes:,} genes (typical of bacterial/NCBI annotation)")
     return None, None
+
+
+# ------------------------------ full preparation (used with or without a project) ------------------------------
+
+def prepare(ref, cfg, threads, mem_gb, ram_available_gb, log_file, on_feature_type=None, confirm_ram=None,
+            dry_run=False):
+    """Acquire, validate and index a reference in the shared store.
+
+    on_feature_type(alt, why, counts) -> bool   asked when the annotation has no usable counting feature
+    confirm_ram(need_gb, avail_gb)     -> bool   asked when the index build may not fit in memory
+    Returns (manifest, info) where info carries what a project needs (index prefix, gtf, bed12, ...).
+    """
+    paths = RefPaths(ref["store"])
+    record = acquire(ref, paths, log_file)
+    if dry_run:
+        build_index(paths, {"names": []}, threads, mem_gb, False, log_file)
+        return None, None
+
+    ui.running("Validating genome FASTA (streaming)")
+    fa = validate_fasta(paths.genome)
+    ui.ok(f"FASTA valid: {fa['n_sequences']} sequences, {fa['total_bp']:,} bp")
+
+    ui.running("Validating GTF")
+    ftype = cfg["featurecounts_parameters"]["feature_type"]
+    counts = feature_type_counts(paths.gtf)
+    alt, why = suggest_feature_type(counts, ftype)
+    switched = False
+    if alt:
+        ui.warn(why)
+        ui.info(f"counting '{ftype}' would miss most genes in this annotation")
+        if on_feature_type is None or on_feature_type(alt, why, counts):
+            ftype, switched = alt, True
+    gtf = validate_gtf(paths.gtf, cfg["featurecounts_parameters"]["attribute"], ftype)
+    ui.ok(f"GTF valid: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} {ftype} features")
+    if "exon" not in gtf["feature_types"]:
+        ui.info("no 'exon' features (typical for bacterial annotation): HISAT2 will align without splice sites "
+                "and StringTie2 transcript quantification is not meaningful")
+
+    errors, warns = check_compatibility(fa, gtf, ref.get("assembly"), ref.get("annotation_assembly",
+                                                                              ref.get("assembly")))
+    for w in warns:
+        ui.warn(w)
+    if errors:
+        for e in errors:
+            ui.error(e)
+        if not ref.get("override_compatibility"):
+            raise PipelineError("genome and annotation are not compatible", stage="reference",
+                                remedy="select a matching genome/annotation pair (same assembly and provider)")
+        ui.warn("compatibility errors OVERRIDDEN by user (recorded in manifest)")
+    ui.ok("genome/annotation compatibility checks passed")
+
+    runner.run(["samtools", "faidx", paths.genome], stage="reference", log_file=log_file,
+               description="Indexing FASTA")
+    bed_feature = ftype if counts.get("exon", 0) < counts.get("gene", 0) * 0.9 else "exon"
+    n_tx = gtf_to_bed12(paths.gtf, paths.bed12, bed_feature)
+    ui.ok(f"BED12 written for strandedness inference ({n_tx:,} {bed_feature} features)")
+
+    setting = cfg["hisat2_build"]["use_splice_sites_in_index"]
+    use_ss = (index_ram_needed_gb(fa["total_bp"], True) <= ram_available_gb * 0.9) if setting == "auto" \
+        else bool(setting)
+    ok, why_idx = index_valid(paths.index_prefix, fa["names"])
+    previous = C.load_yaml(paths.manifest) if paths.manifest.exists() else {}
+    if ok and paths.splice_sites.exists():
+        use_ss = bool(previous.get("index", {}).get("splice_sites_in_index", False))
+        ui.skipped(f"existing HISAT2 index is valid ({why_idx}); not rebuilding")
+    else:
+        need = index_ram_needed_gb(fa["total_bp"], use_ss)
+        ui.info(f"HISAT2 index build: splice sites in index = {use_ss} (est. RAM {need:.1f} GB; "
+                f"available {ram_available_gb} GB)")
+        if not use_ss:
+            ui.info("known splice sites will be supplied at alignment time (--known-splicesite-infile)")
+        if need > ram_available_gb:
+            ui.warn("estimated RAM exceeds available memory; the build may fail or swap heavily")
+            if confirm_ram is not None and not confirm_ram(need, ram_available_gb):
+                raise UserAbort("index build cancelled")
+        build_index(paths, fa, threads, mem_gb, use_ss, log_file, cfg["hisat2_build"].get("extra_args", []))
+        ok, why_idx = index_valid(paths.index_prefix, fa["names"])
+        if not ok:
+            raise PipelineError(f"HISAT2 index invalid after build: {why_idx}", stage="reference")
+        ui.ok(f"HISAT2 index built and validated ({why_idx})")
+
+    manifest = {
+        "organism": ref.get("organism"), "source": ref.get("source"), "genome_assembly": ref.get("assembly"),
+        "annotation_assembly": ref.get("annotation_assembly", ref.get("assembly")),
+        "annotation_release": ref.get("annotation_release"), "label": ref.get("label"), "files": record,
+        "genome": {"path": str(paths.genome), "sequences": fa["n_sequences"], "total_bp": fa["total_bp"]},
+        "annotation": {"path": str(paths.gtf), "genes": gtf["genes"], "transcripts": gtf["transcripts"],
+                       "counted_features": gtf["exons"], "feature_type": ftype,
+                       "feature_types": gtf["feature_types"], "header_build": gtf["header_build"]},
+        "index": {"prefix": str(paths.index_prefix), "status": "valid", "splice_sites_in_index": use_ss,
+                  "splice_sites_file": str(paths.splice_sites), "exons_file": str(paths.exons)},
+        "compatibility": {"errors": errors, "warnings": warns, "override": bool(ref.get("override_compatibility"))},
+        "store": str(paths.base),
+    }
+    write_manifest(paths.manifest, manifest)
+    info = {"paths": paths, "fa": fa, "gtf": gtf, "feature_type": ftype, "feature_type_switched": switched,
+            "counts": counts, "use_ss": use_ss,
+            "state": {"index_prefix": str(paths.index_prefix), "index_has_splice_sites": use_ss,
+                      "no_splice_sites": paths.splice_sites.exists() and paths.splice_sites.stat().st_size == 0,
+                      "splice_sites": str(paths.splice_sites), "gtf": str(paths.gtf), "bed12": str(paths.bed12),
+                      "genes": gtf["genes"], "genome_bp": fa["total_bp"]}}
+    return manifest, info
+
+
+def scan_store(store_root):
+    """Find usable references under a directory: prepared ones (manifest) and plain FASTA+GTF folders."""
+    root = Path(os.path.expanduser(str(store_root)))
+    out = []
+    if not root.is_dir():
+        return out
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        man = d / "reference_manifest.yaml"
+        if man.exists():
+            m = C.load_yaml(man)
+            out.append({"kind": "prepared", "dir": d, "label": m.get("label") or d.name, "manifest": m,
+                        "indexed": bool(index_files(d / "index" / "genome"))})
+            continue
+        fa = sorted(list(d.glob("*.fa")) + list(d.glob("*.fasta")) + list(d.glob("*.fna"))
+                    + list(d.glob("*.fa.gz")) + list(d.glob("*.fasta.gz")) + list(d.glob("*.fna.gz")))
+        gtf = sorted(list(d.glob("*.gtf")) + list(d.glob("*.gtf.gz")))
+        if fa and gtf:
+            extra = f", {len(fa)} FASTA / {len(gtf)} GTF candidates" if len(fa) > 1 or len(gtf) > 1 else ""
+            out.append({"kind": "files", "dir": d,
+                        "label": f"{d.name} ({fa[0].name} + {gtf[0].name}{extra})",
+                        "fasta": fa[0], "gtf": gtf[0], "fastas": fa, "gtfs": gtf, "indexed": False})
+    return out

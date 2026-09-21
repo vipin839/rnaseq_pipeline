@@ -78,6 +78,20 @@ stages after re-checking their outputs, and re-runs anything invalid. If a stage
 reboot), its partial outputs (`*.partial.*`) are never used. The stage simply runs again. Samples that were already
 aligned and still pass validation are not re-aligned.
 
+## Preparing references ahead of time
+
+**Main menu → 5. Manage Reference Databases** shows the catalog and everything already prepared in the shared
+store (`reference_store`), and offers:
+
+* **Download and prepare a reference now** — no project needed. Pick a catalog package, search NCBI for any
+  organism, or give local files; it downloads, verifies checksums, validates and builds the HISAT2 index into
+  the store. Useful for starting a large genome (human takes 1–2 hours) before you have data.
+* **Select/change the reference of a project.**
+* **Delete a prepared reference** (asks you to type the folder name; projects using it would re-download).
+
+Projects then pick it instantly under *Existing reference/index*, which lists prepared references as `[ready]`
+and any folder containing a FASTA + GTF pair as `[needs index]`.
+
 ## Validating a project
 
 **Main menu → 3.** Re-hashes every recorded output and re-runs the integrity checks (for example BAM quickcheck).

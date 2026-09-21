@@ -358,3 +358,24 @@ def test_ncbi_email_validated():
     assert any("ncbi.email" in e for e in C.validate(cfg, 4))
     C.set_value(cfg, "ncbi.email", "user@example.org")
     assert C.validate(cfg, 4) == []
+
+
+# ---------------- reference store discovery ----------------
+def test_scan_store_finds_prepared_and_plain_folders(tmp_path):
+    prepared = tmp_path / "yeast_ensembl_112"
+    (prepared / "index").mkdir(parents=True)
+    (prepared / "reference_manifest.yaml").write_text("label: R64-1-1 / Ensembl 112\norganism: yeast\n")
+    for i in range(1, 9):
+        (prepared / "index" / f"genome.{i}.ht2").write_bytes(b"x")
+    plain = tmp_path / "ecoli_UTI89"
+    plain.mkdir()
+    (plain / "a_genomic.fna").write_text(">c\nACGT\n")
+    (plain / "a_genomic.gtf").write_text("c\ts\texon\t1\t4\t.\t+\t.\tgene_id \"g\";\n")
+    (plain / "b_genomic.fna").write_text(">c\nACGT\n")
+    (tmp_path / "empty").mkdir()
+    found = {r["dir"].name: r for r in reference_manager.scan_store(tmp_path)}
+    assert set(found) == {"yeast_ensembl_112", "ecoli_UTI89"}
+    assert found["yeast_ensembl_112"]["kind"] == "prepared" and found["yeast_ensembl_112"]["indexed"]
+    assert found["ecoli_UTI89"]["kind"] == "files" and len(found["ecoli_UTI89"]["fastas"]) == 2
+    assert "2 FASTA" in found["ecoli_UTI89"]["label"]
+    assert reference_manager.scan_store(tmp_path / "does-not-exist") == []

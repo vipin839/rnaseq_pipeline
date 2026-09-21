@@ -5,6 +5,9 @@ Every failure screen shows **Problem**, **Likely cause** and **Recommended actio
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
+| `./rnaseq_pipeline: Permission denied` after cloning | The executable bit was lost (clone on a Windows/NTFS/exFAT drive, or a restrictive umask). `chmod +x` has no effect on `/mnt/c` style mounts | Run `bash rnaseq_pipeline` or `python3 rnaseq_pipeline.py` — both work without the bit. Better: clone into the Linux filesystem (e.g. `~/rnaseq_pipeline`), where `chmod +x rnaseq_pipeline` works |
+| `bad interpreter: /usr/bin/env bash^M` | Windows line endings (CRLF) in the launcher | `sed -i 's/\r$//' rnaseq_pipeline`. The repo ships `.gitattributes` forcing LF, so a fresh clone should not have this |
+| `No references found` under *Existing reference/index* | The folder has no `reference_manifest.yaml` and no FASTA+GTF pair, or it is not the configured `reference_store` | Use *Look in another folder*, or prepare it once via main menu 5 → *Download and prepare a reference now* |
 | `program not found: hisat2` (or another tool) | The tools env is missing or incomplete | Main menu 4 → Install missing components, or `./rnaseq_pipeline --check` |
 | `PyYAML is missing` | The system Python lacks PyYAML | `python3 -m pip install --user pyyaml`, or create the conda envs (the launcher falls back to their Python) |
 | `project filesystem is vfat` | Project on a FAT32 USB disk (4 GB file limit) | Create the project on an ext4 disk (e.g. under your home directory) |
