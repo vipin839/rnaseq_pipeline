@@ -159,11 +159,15 @@ def run_pipeline(cmds, *, stage, sample=None, log_file=None, stdout_file=None, c
     result = Result(codes, stdout_data, duration, command_str)
     if check and any(c not in expected_codes for c in codes):
         tail = tail_file(log_file) if log_file else ""
+        bad = [i for i, c in enumerate(codes) if c not in expected_codes][0]
+        meaning = describe_exit(codes[bad])
         raise PipelineError(
-            f"command failed (exit codes {codes}): {cmds[[i for i, c in enumerate(codes) if c not in expected_codes][0]][0]}",
+            f"command failed (exit codes {codes}): {cmds[bad][0]}" + (f" — {meaning}" if meaning else ""),
             stage=stage, sample=sample,
             cause=(tail or "see log file") + (f"\n  Full log: {log_file}" if log_file else ""),
-            remedy="inspect the log above; fix the input/tool problem and resume the project")
+            remedy=("run 'rnaseq-pipeline --check': it names a build of the program that runs on this CPU"
+                    if "SIGILL" in meaning else
+                    "inspect the log above; fix the input/tool problem and resume the project"))
     return result
 
 
@@ -196,6 +200,32 @@ def tail_file(path, n=12):
         return "\n".join("    " + l for l in lines[-n:])
     except OSError:
         return ""
+
+
+def describe_exit(code):
+    """Plain-language meaning of an exit code that says the program was killed by a signal."""
+    if code is None:
+        return ""
+    sig = -code if code < 0 else (code - 128 if 128 < code < 160 else None)
+    if sig == signal.SIGILL:
+        from . import system_check
+        missing = system_check.missing_x86_64_v3()
+        return ("killed by SIGILL (illegal CPU instruction): this build of the program needs processor features "
+                + (f"this CPU lacks ({', '.join(missing)})" if missing else "this CPU does not have"))
+    if sig == signal.SIGKILL:
+        return "killed by SIGKILL (often the system running out of memory)"
+    if sig == signal.SIGSEGV:
+        return "crashed (SIGSEGV, segmentation fault)"
+    return ""
+
+
+def tool_run(cmd, timeout=60):
+    """Like tool_output, but returns (exit code, output); (None, None) if the program cannot be started."""
+    try:
+        r = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout, env=child_env())
+        return r.returncode, (r.stdout + r.stderr).decode(errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
 
 
 def tool_output(cmd, timeout=60):

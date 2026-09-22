@@ -36,6 +36,11 @@ TOOLS = [
      "Downloads references and ENA FASTQ files"),
 ]
 
+# Tools whose current Bioconda builds are compiled for x86-64-v3 (AVX2/BMI2) and die with SIGILL on older CPUs,
+# and the newest version whose build does not use those instructions (checked by disassembling the binaries:
+# stringtie 3.0.0-3.0.3 all contain AVX2/BMI2 instructions; 2.2.1 and 2.2.3 contain none).
+OLD_CPU_VERSIONS = {"stringtie": "2.2.3"}
+
 R_PACKAGES = [
     ("DESeq2", "bioconductor-deseq2", True, "Differential expression statistics"),
     ("ggplot2", "r-ggplot2", True, "Plots"),
@@ -80,12 +85,20 @@ def detect_tools():
         if not path:
             rec["status"] = "MISSING" if required else "OPTIONAL"
         else:
-            out = runner.tool_output([path, *vcmd])
+            code, out = runner.tool_run([path, *vcmd])
             v = parse_version(out, key)
             rec["version"] = v
-            if v is None:
+            meaning = runner.describe_exit(code)
+            if "SIGILL" in (meaning or ""):
                 rec["status"] = "INCOMPATIBLE"
-                rec["note"] = "installed but version could not be determined (tool may be broken)"
+                rec["note"] = meaning
+                rec["cpu_incompatible"] = True
+                if key in OLD_CPU_VERSIONS:
+                    rec["install_spec"] = f"{pkg}={OLD_CPU_VERSIONS[key]}"
+            elif v is None:
+                rec["status"] = "INCOMPATIBLE"
+                rec["note"] = ("installed but does not run: " + meaning if meaning else
+                               "installed but version could not be determined (tool may be broken)")
             elif vtuple(v) < vtuple(minv):
                 rec["status"] = "OUTDATED"
             else:
@@ -161,6 +174,15 @@ def write_versions(path, tools, r_info, r_pkgs):
     return path
 
 
+def cpu_fix_command(envs, tool):
+    """The exact command that replaces a CPU-incompatible build, or None if no compatible build is known."""
+    if not tool.get("install_spec"):
+        return None
+    exe = envs.conda_bin()
+    name = Path(str(exe)).name if exe else "mamba"
+    return f'{name} install -n {envs.names[tool["env"]]} -c conda-forge -c bioconda "{tool["install_spec"]}"'
+
+
 def tool_versions_map(tools):
     return {t["key"]: t["version"] for t in tools}
 
@@ -186,7 +208,7 @@ def interactive_install(envs, tools, r_info, r_pkgs, log_file):
         if envs.prefix("tools") is None:
             plans.append(("Create tools environment '%s'" % envs.names["tools"], envs.create_commands("tools")))
         else:
-            pkgs = sorted({t["package"] for t in missing_tools})
+            pkgs = sorted({t.get("install_spec") or t["package"] for t in missing_tools})
             plans.append(("Install/upgrade in '%s': %s" % (envs.names["tools"], ", ".join(pkgs)),
                           envs.install_commands("tools", pkgs)))
     if missing_r or r_missing:
@@ -199,6 +221,11 @@ def interactive_install(envs, tools, r_info, r_pkgs, log_file):
     ui.section("PROPOSED INSTALLATION (user space, no sudo)")
     for t in missing_tools:
         print(f"  - {t['key']:<20} {t['purpose']}")
+        if t.get("cpu_incompatible"):
+            print(f"      {t['note']}.")
+            if t.get("install_spec"):
+                print(f"      Installs {t['install_spec']}, the newest build that runs on this CPU. The version is "
+                      "recorded in the project's software versions.")
     for p in missing_r:
         print(f"  - R:{p['package']:<18} {p['purpose']}")
     print("\nCommands that would be executed:")

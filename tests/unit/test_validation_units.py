@@ -587,3 +587,50 @@ def test_envs_found_under_mamba_root_prefix(tmp_path, monkeypatch):
     envs = EM.Environments({"environment": {"conda_root": str(tmp_path / "no_miniforge")}})
     assert envs.prefix("tools") == root / "envs" / "rnaseq-tools"
     assert envs.rscript() == rs
+
+
+# ---------------------------------------------------------------- builds that need a newer CPU (SIGILL)
+def _sigill_tool(d, name):
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    f.write_text("#!/bin/sh\nkill -ILL $$\n")      # what an AVX2/BMI2 binary does on an older processor
+    f.chmod(0o755)
+    return f
+
+
+def test_cpu_level_from_cpuinfo(tmp_path):
+    from rnaseq_pipeline import system_check
+    new = tmp_path / "new"
+    new.write_text("processor : 0\nflags : fpu sse4_2 avx avx2 bmi1 bmi2 fma movbe abm popcnt\n")
+    old = tmp_path / "old"                       # Ivy Bridge: AVX but no AVX2/BMI/FMA
+    old.write_text("processor : 0\nflags : fpu sse4_2 avx popcnt\n")
+    assert system_check.missing_x86_64_v3(str(new)) == []
+    assert system_check.missing_x86_64_v3(str(old)) == ["AVX2", "BMI1", "BMI2", "FMA", "MOVBE", "LZCNT"]
+    assert system_check.missing_x86_64_v3(str(tmp_path / "absent")) == []
+
+
+def test_exit_codes_explained():
+    from rnaseq_pipeline import runner
+    assert "SIGILL" in runner.describe_exit(-4) and "SIGILL" in runner.describe_exit(132)
+    assert "memory" in runner.describe_exit(-9)
+    assert runner.describe_exit(1) == "" and runner.describe_exit(0) == ""
+
+
+def test_sigill_tool_reported_as_cpu_incompatible_with_a_compatible_version(tmp_path, monkeypatch):
+    from rnaseq_pipeline import dependency_manager as DM
+    _sigill_tool(tmp_path / "bin", "stringtie")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.setattr(DM, "TOOLS", [t for t in DM.TOOLS if t[0] == "stringtie"])
+    monkeypatch.setattr(DM.runner, "which", lambda exe: tmp_path / "bin" / exe)
+    (t,) = DM.detect_tools()
+    assert t["status"] == "INCOMPATIBLE" and t["cpu_incompatible"]
+    assert "SIGILL" in t["note"]
+    assert t["install_spec"] == "stringtie=2.2.3"      # not "reinstall": the same build would crash again
+
+
+def test_pipeline_command_killed_by_sigill_is_explained(tmp_path):
+    from rnaseq_pipeline import runner
+    tool = _sigill_tool(tmp_path / "bin", "stringtie")
+    with pytest.raises(PipelineError) as e:
+        runner.run([str(tool)], stage="stringtie")
+    assert "SIGILL" in str(e.value) and "--check" in e.value.remedy

@@ -69,7 +69,9 @@ FUNCTIONAL = [
 ]
 
 
-def check_functional(rep):
+def check_functional(rep, fixes=None):
+    """fixes: {executable: command} replacing builds that cannot run on this CPU."""
+    fixes = fixes or {}
     d = Path(tempfile.mkdtemp(prefix="rnaseq_doctor_"))
     try:
         _tiny_dataset(d)
@@ -89,7 +91,14 @@ def check_functional(rep):
                 rep.add("Functional test", name, PASS, "ran a tiny job successfully")
             else:
                 broken.add(name)
-                rep.add("Functional test", name, FAIL, f"exit {code}: {out.strip().splitlines()[-1][:90] if out.strip() else ''}",
+                meaning = runner.describe_exit(code)
+                if "SIGILL" in meaning:
+                    fix = fixes.get(tool) or ("install a build of this program for older CPUs (main menu 4); "
+                                              "reinstalling the same build will not help")
+                    rep.add("Functional test", name, FAIL, f"exit {code}: {meaning}", fix)
+                    continue
+                last = out.strip().splitlines()[-1][:90] if out.strip() else ""
+                rep.add("Functional test", name, FAIL, f"exit {code}: {meaning or last}",
                         "the tool is installed but does not work; reinstall the tools environment (main menu 4)")
         fc = d / "fc.txt.summary"
         if fc.exists():
@@ -145,6 +154,10 @@ def run(cfg, envs, projects_dir, config_sources, quick=False):
             "" if info["os"] == "Linux" else "Linux is required")
     rep.add("System", "Python", PASS if info["python_ok"] else FAIL, info["python"], "Python 3.10+ is required")
     rep.add("System", "CPU", PASS if info["cpu_cores"] >= 2 else WARN, f"{info['cpu_cores']} cores")
+    lacking = system_check.missing_x86_64_v3()
+    rep.add("System", "CPU instruction set", PASS,
+            f"older than x86-64-v3 (no {', '.join(lacking)}); tools are checked for builds that run here" if lacking
+            else "x86-64-v3 or newer (AVX2/BMI2)")
     rep.add("System", "RAM", PASS if info["ram_total_gb"] >= 8 else WARN, f"{info['ram_total_gb']} GB",
             "8 GB+ recommended; mammalian genomes need ~8 GB for alignment")
     disk_state = FAIL if any("insufficient disk" in c for c in crit) else (
@@ -177,11 +190,19 @@ def run(cfg, envs, projects_dir, config_sources, quick=False):
     rep.add("Environment", "conda/mamba", PASS if conda else WARN, str(conda or "not found"),
             "" if conda else "only needed to install/repair tools from the menu")
     tools = dependency_manager.detect_tools()
+    fixes = {}
     for t in tools:
         state = {"AVAILABLE": PASS, "OPTIONAL": WARN}.get(t["status"], FAIL)
-        rep.add("Tools", t["key"], state, f"{t['version'] or '-'} ({t['status'].lower()})",
-                "" if state == PASS else ("optional: " + t["purpose"] if state == WARN
-                                          else "install/repair via main menu 4"))
+        detail = f"{t['version'] or '-'} ({t['status'].lower()})"
+        fix = "" if state == PASS else ("optional: " + t["purpose"] if state == WARN else "install/repair via main menu 4")
+        if t.get("cpu_incompatible"):
+            detail = t["note"]
+            cmd = dependency_manager.cpu_fix_command(envs, t)
+            fix = (f"install a build that runs on this CPU: {cmd}  (or main menu 4)" if cmd else
+                   "no build for this CPU is known; reinstalling the same build will not help")
+            if cmd:
+                fixes[t["exe"]] = fix
+        rep.add("Tools", t["key"], state, detail, fix)
     r_info, r_pkgs = dependency_manager.detect_r(envs.rscript())
     rep.add("R", "R version", PASS if r_info["status"] == "AVAILABLE" else FAIL, r_info.get("version") or "missing",
             "" if r_info["status"] == "AVAILABLE" else "R 4.x is required for DESeq2")
@@ -189,7 +210,7 @@ def run(cfg, envs, projects_dir, config_sources, quick=False):
         if p["status"] != "AVAILABLE":
             rep.add("R", p["package"], FAIL if p["required"] else WARN, "missing", "install via main menu 4")
     if not quick:
-        check_functional(rep)
+        check_functional(rep, fixes)
         check_r(rep, envs.rscript())
         check_network(rep)
     return rep

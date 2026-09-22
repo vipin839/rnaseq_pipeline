@@ -45,6 +45,32 @@ def mount_for(path):
     return best
 
 
+# x86-64-v3 = the "Haswell" level (2013+). Some Bioconda binaries are compiled for it and die with SIGILL
+# (illegal instruction) on older processors. `abm` is how /proc/cpuinfo names LZCNT.
+X86_64_V3_FLAGS = ("avx", "avx2", "bmi1", "bmi2", "fma", "movbe", "abm")
+
+
+def cpu_flags(cpuinfo="/proc/cpuinfo"):
+    try:
+        with open(cpuinfo) as f:
+            for line in f:
+                if line.startswith("flags"):
+                    return set(line.split(":", 1)[1].split())
+    except OSError:
+        pass
+    return None
+
+
+def missing_x86_64_v3(cpuinfo="/proc/cpuinfo"):
+    """CPU features of x86-64-v3 this processor lacks ([] if it has them all, or if this cannot be determined)."""
+    if platform.machine() not in ("x86_64", "AMD64"):
+        return []
+    flags = cpu_flags(cpuinfo)
+    if flags is None:
+        return []
+    return [f.upper().replace("ABM", "LZCNT") for f in X86_64_V3_FLAGS if f not in flags]
+
+
 def mem_gb():
     try:
         with open("/proc/meminfo") as f:

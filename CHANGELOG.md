@@ -59,9 +59,15 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
 * R was not found in micromamba installations (`$MAMBA_ROOT_PREFIX/envs`), and when several R installations are on
   PATH the first one was used even if it lacks DESeq2 (the tools environment contains a bare R, required by RSeQC).
   Now environments under `$MAMBA_ROOT_PREFIX` are found and the R that has DESeq2 is preferred.
+* **Older CPUs:** every Bioconda build of StringTie 3.x is compiled for x86-64-v3 (AVX2/BMI2) and is killed with
+  SIGILL on older processors; `--check` said "reinstall", which reinstalls the same build. Now `--check` shows the
+  CPU instruction level, recognises a SIGILL crash as a CPU incompatibility, and names the fix
+  (`stringtie=2.2.3`, whose build uses no AVX2/BMI2 instructions); main menu 4 proposes that version, and a
+  pipeline step killed by SIGILL says so. StringTie only produces the transcript TPM tables; the DESeq2 input
+  (featureCounts) is unaffected. The installed StringTie version is recorded in each project, as before.
 
 ### Tests
-* 204 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 208 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

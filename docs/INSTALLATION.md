@@ -23,6 +23,9 @@ rnaseq-pipeline --check
 * Disk: about 6 GB for the runtime, plus data. Put projects on ext4/xfs. The tool refuses FAT32 (4 GB file limit) and
   warns about Windows drives mounted in WSL (`/mnt/c`), which are slow.
 * RAM: 8 GB for mammalian genomes. Small genomes (yeast, bacteria) work with less.
+* CPU: any x86-64. On processors without AVX2/BMI2 (roughly pre-2013, e.g. Xeon E5 v1/v2), the Bioconda
+  StringTie 3.x builds cannot run; `rnaseq-pipeline --check` detects this and gives the one-line fix
+  (`mamba install -n rnaseq-tools -c conda-forge -c bioconda "stringtie=2.2.3"`).
 
 ## Option A — application with pipx, runtime with conda (recommended today)
 
