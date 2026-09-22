@@ -1,5 +1,6 @@
 """NCBI SRA route: prefetch -> vdb-validate -> fasterq-dump -> compress."""
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -65,6 +66,14 @@ def download_run(acc, raw_dir, fastq_dir, temp_dir, threads, paired, *, max_read
     if runner.DRY_RUN:
         return finals[0], (finals[1] if paired else None)
     names = {p.name: p for p in produced}
+    extra_mates = sorted(n for n in names if re.match(rf"{acc}_[3-9]\.fastq\.gz$", n))
+    if extra_mates:
+        shutil.rmtree(work, ignore_errors=True)
+        raise PipelineError(f"{acc} has more than two reads per spot ({len(extra_mates) + 2} or more)",
+                            sample=acc, stage="data",
+                            cause="index/cell-barcode/UMI reads are stored with the cDNA read (typical of 10x "
+                                  "Genomics single-cell libraries), so this is not a standard bulk library",
+                            remedy="analyse single-cell data with Cell Ranger / STARsolo / alevin-fry")
     if paired:
         want = [f"{acc}_1.fastq.gz", f"{acc}_2.fastq.gz"]
         if not all(w in names for w in want):

@@ -15,6 +15,9 @@ FMT = "%(asctime)s %(levelname)-7s %(message)s"
 def init_base_logging(verbose=False):
     log.setLevel(logging.DEBUG)
     log.propagate = False
+    if not any(isinstance(h, logging.NullHandler) for h in log.handlers):
+        # without any handler Python's "last resort" handler would echo records to the terminal
+        log.addHandler(logging.NullHandler())
 
 
 def attach_project(logs_dir):

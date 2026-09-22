@@ -10,7 +10,7 @@ FIELDS = ["run_accession", "experiment_accession", "sample_accession", "study_ac
           "secondary_study_accession", "library_layout", "library_strategy", "library_source",
           "library_selection", "library_name", "instrument_platform", "instrument_model", "read_count",
           "base_count", "fastq_ftp", "fastq_md5", "fastq_bytes", "scientific_name", "tax_id", "study_title",
-          "sample_title", "sample_alias", "experiment_title", "run_alias"]
+          "sample_title", "sample_alias", "experiment_title", "run_alias", "library_construction_protocol"]
 
 
 def parse_tsv(text):

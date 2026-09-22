@@ -146,7 +146,10 @@ def validate(cfg, cores=None, ram_gb=None):
     elif n.get("email") and "@" not in n["email"]:
         errs.append("ncbi.email must be an email address (or empty)")
     dl = cfg.get("download") or {}
-    chk(V.positive_int, dl.get("max_reads", 0), "download.max_reads", 0)
+    mr = dl.get("max_reads", 0)
+    chk(V.positive_int, mr, "download.max_reads", 0)
+    if isinstance(mr, int) and 0 < mr < 1000:
+        errs.append("download.max_reads must be 0 (full data) or at least 1000 reads (pilot subset)")
     return errs
 
 

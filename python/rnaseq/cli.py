@@ -30,7 +30,19 @@ class App:
         self.args = args
         self.cfg = C.load()
         if args.config:
-            self.cfg = C.deep_merge(self.cfg, C.load_yaml(V.existing_file(args.config)))
+            try:
+                path = V.existing_file(args.config)
+            except ValueError as e:
+                raise PipelineError(f"--config: {e}", remedy="check the path of your personal config file, "
+                                    "e.g. ~/my_rnaseq.yaml")
+            try:
+                extra = C.load_yaml(path)
+            except Exception as e:  # malformed YAML
+                raise PipelineError(f"--config: {path} is not valid YAML", cause=str(e)[:300],
+                                    remedy="fix the file (indentation, quotes) and start again")
+            if not isinstance(extra, dict):
+                raise PipelineError(f"--config: {path} must contain settings like 'ncbi:' / 'threads:'")
+            self.cfg = C.deep_merge(self.cfg, extra)
             C.require_valid(self.cfg, os.cpu_count())
         entrez.configure(self.cfg)
         self.envs = environment_manager.Environments(self.cfg)
@@ -303,6 +315,20 @@ class App:
                                                        f"{r.get('_geo', {}).get('title') or r.get('sample_title', '')}"
                                                        for r in runs])
         runs = [runs[i] for i in idx]
+        sc = [r for r in runs if data_manager.single_cell_reason(r)]
+        if sc:
+            ui.section("SINGLE-CELL DATA DETECTED")
+            print(f"  {len(sc)} of the {len(runs)} selected run(s) are single-cell RNA-seq, e.g. "
+                  f"{sc[0]['run_accession']}: {data_manager.single_cell_reason(sc[0])}.\n"
+                  "  This pipeline is for BULK RNA-seq. Single-cell reads carry cell barcodes and UMIs that\n"
+                  "  HISAT2/featureCounts/DESeq2 cannot use, so the results would be wrong. Analyse them with a\n"
+                  "  single-cell tool (Cell Ranger, STARsolo or alevin-fry) instead.")
+            runs = [r for r in runs if r not in sc]
+            if not runs:
+                raise PipelineError("all selected runs are single-cell RNA-seq; nothing was added",
+                                    remedy="choose a bulk RNA-seq dataset (library source TRANSCRIPTOMIC)")
+            if not ui.ask_yes_no(f"Continue with only the {len(runs)} bulk run(s)?", default=False):
+                raise PipelineError("data selection cancelled (single-cell runs)")
         total = sum(f[2] or 0 for r in runs for f in r.get("_files", [])) / 1e9
         ui.info(f"{len(runs)} run(s), approx. {total:.1f} GB of compressed FASTQ")
         mode = ui.choose("Download scope", ["Full data (for real analysis)",
@@ -591,7 +617,7 @@ class App:
             workflow.show_status(ctx)
             c = ui.choose(f"PROJECT: {p.name}", [
                 "Continue pipeline (run remaining stages)", "Re-run a specific stage", "Select samples (all / subset)",
-                "Samples: status / re-include failed", "Choose data source (projects without samples)",
+                "Samples: status / re-include failed", "Choose or replace the data source",
                 "Change reference", "Experimental design (edit / confirm)", "Clean up intermediate files",
                 "Dry run (show what would be executed)", "Return to main menu"])
             if c == 0:
@@ -610,7 +636,7 @@ class App:
                 self.samples_menu(p)
             elif c == 4:
                 if p.samples:
-                    ui.warn("this project already has samples; create a new project for different data")
+                    self.replace_data(p)
                 else:
                     self.choose_data(p)
             elif c == 5:
@@ -627,13 +653,67 @@ class App:
                 return
 
     def ensure_inputs(self, p):
-        """A project must have samples and a reference before the pipeline can run: ask for what is missing."""
+        """A project must have usable samples and a reference before the pipeline can run: fix what is missing."""
+        if p.samples and not p.active_samples():
+            ui.section("NO USABLE SAMPLES")
+            rows = [(s, r.get("status"), r.get("failed_stage") or "", (r.get("fail_reason") or "")[:70])
+                    for s, r in p.samples.items()]
+            ui.table(rows[:20], ["Sample", "Status", "Failed at", "Reason"], max_col=70)
+            if len(rows) > 20:
+                print(f"  ... and {len(rows) - 20} more")
+            c = ui.choose("What would you like to do?",
+                          ["Retry these samples (the failed step runs again)",
+                           "Replace them with a different data source",
+                           "Return to the project menu"])
+            if c == 2:
+                raise UserAbort("no usable samples")
+            if c == 0:
+                for rec in p.samples.values():
+                    if rec.get("status") in ("FAILED", "EXCLUDED"):
+                        rec.update(status="OK", fail_reason=None)
+                        rec.pop("failed_stage", None)
+                p.state["selected_samples"] = None
+                p.save()
+                ui.ok("samples re-included; the pipeline will retry them")
+            else:
+                self.replace_data(p)
+        sc = data_manager.single_cell_samples(p, p.active_samples())
+        if sc:
+            first = next(iter(sc))
+            ui.section("SINGLE-CELL DATA IN THIS PROJECT")
+            print(f"  {len(sc)} sample(s) are single-cell RNA-seq (e.g. {first}: {sc[first]}).\n"
+                  "  This bulk pipeline cannot analyse them correctly; they need a single-cell tool\n"
+                  "  (Cell Ranger, STARsolo or alevin-fry).")
+            if ui.choose("What would you like to do?", ["Replace them with a different (bulk) data source",
+                                                         "Return to the project menu"]) == 1:
+                raise UserAbort("single-cell samples kept")
+            self.replace_data(p)
         if not p.samples:
             ui.warn("this project has no samples yet — choose a data source now")
             self.choose_data(p)
         if not p.state.get("reference"):
             ui.warn("this project has no reference genome yet — choose one now")
             self.select_reference(p)
+
+    def replace_data(self, p):
+        """Forget the registered samples (files on disk are kept) so a new data source can be chosen."""
+        cp = workflow.Checkpoints(p)
+        done = [s.key for s in workflow.STAGES if cp.exists(s.key) and s.key != "reference_ready"]
+        if done and not ui.ask_yes_no(f"{len(done)} completed step(s) depend on the current samples and will be "
+                                      "re-run with the new data. Continue?", default=False):
+            raise UserAbort("data source kept")
+        for key in done:
+            cp.invalidate(key, "data source replaced")
+        n = len(p.samples)
+        for k in ("samples", "accessions"):
+            p.state[k] = {} if k == "samples" else []
+        for k in ("data_source", "read_type", "organism_hint", "selected_samples", "qc_decision",
+                  "strandedness", "design", "design_draft", "count_units", "count_unit_runs"):
+            p.state[k] = None
+        p.save()
+        p.log_event(f"data source replaced ({n} sample record(s) removed; files kept)")
+        ui.ok(f"removed {n} sample record(s); downloaded files were kept on disk")
+        self.choose_data(p)
 
     def samples_menu(self, p):
         rows = [(s, r.get("status"), r.get("failed_stage") or "", (r.get("fail_reason") or "")[:60])
@@ -966,7 +1046,11 @@ def main(argv=None):
     ui.VERBOSE = args.verbose or bool(C.load().get("verbose"))
     logger.init_base_logging(args.verbose)
     runner.DRY_RUN = args.dry_run
-    app = App(args)
+    try:
+        app = App(args)
+    except PipelineError as e:
+        ui.explain_failure(e)
+        return 1
     try:
         if args.check:
             info = app.sysinfo()

@@ -180,9 +180,17 @@ class DataStage(Stage):
                  if ctx.cfg["download"]["max_reads"] else "no (full data)")]
 
     def check_inputs(self, ctx):
+        if not ctx.project.samples:
+            return ["no samples defined — choose 'Continue pipeline' in the project menu (it asks for a data source)"]
         if not ctx.samples:
-            return ["no samples defined — return to the project menu and choose 'Continue pipeline' "
-                    "(it asks for a data source) or 'Choose data source'"]
+            bad = [r for r in ctx.project.samples.values() if r.get("status") in ("FAILED", "EXCLUDED")]
+            return [f"all {len(bad)} sample(s) are FAILED/EXCLUDED — choose 'Continue pipeline' in the project "
+                    "menu to retry them or replace the data source"]
+        sc = data_manager.single_cell_samples(ctx.project, ctx.samples)
+        if sc:
+            first = next(iter(sc))
+            return [f"{len(sc)} sample(s) are SINGLE-CELL RNA-seq ({first}: {sc[first]}); this bulk pipeline "
+                    "cannot analyse them — use 'Choose or replace the data source' in the project menu"]
         want = ctx.cfg.get("read_type", "auto")
         have = ctx.project.state.get("read_type")
         if want != "auto" and have and want != have:
@@ -204,8 +212,11 @@ class DataStage(Stage):
                 continue
             try:
                 files = (rec.get("download") or {}).get("files") or []
-                if rec["source"] == "ena" and not files:
-                    ui.info(f"{sid}: ENA has no mirrored FASTQ for this run; using the NCBI SRA route instead")
+                expected = 2 if rec.get("layout") == "PAIRED" else 1
+                if rec["source"] == "ena" and len(files) != expected:
+                    why = "has no mirrored FASTQ" if not files else \
+                        f"lists {len(files)} FASTQ file(s) for a {rec.get('layout')} run"
+                    ui.info(f"{sid}: ENA {why}; using the NCBI SRA route (fasterq-dump splits the reads itself)")
                     rec["source"] = "sra"
                     p.save()
                 if rec["source"] == "sra":
@@ -1010,11 +1021,11 @@ def stage_screen(ctx, idx, stage):
         for pr in problems:
             ui.error(pr)
         c = ui.choose(None, ["Start " + stage.title.split(" (")[0].lower(), "Review settings", "Change settings",
-                             "Validate inputs again", "Return to main menu", "Cancel"])
+                             "Validate inputs again", "Return to the project menu", "Cancel"])
         if c == 0:
             if problems:
-                ui.error("resolve the input problems above first")
-                continue
+                ui.error("this step cannot start until the problem above is fixed — returning to the project menu")
+                return "menu"
             return "run"
         if c == 1:
             show_settings(ctx, stage)
@@ -1085,6 +1096,16 @@ def run_stage(ctx, idx, stage):
         if s != "VALID" and not ctx.dry_run:
             raise PipelineError(f"upstream stage '{dep}' is {s}" + (f": {why}" if why else ""), stage=stage.key,
                                 remedy="resume the project so earlier stages are completed first")
+    if not ctx.dry_run:
+        retry = [s for s, r in ctx.project.samples.items()
+                 if r.get("status") == "FAILED" and r.get("failed_stage") == stage.key]
+        if retry:
+            for s in retry:
+                rec = ctx.project.samples[s]
+                rec.update(status="OK", previous_failure=rec.get("fail_reason"), fail_reason=None)
+                rec.pop("failed_stage", None)
+            ctx.project.save()
+            ui.info(f"retrying {len(retry)} sample(s) that failed in this step last time")
     probs = stage.check_inputs(ctx)
     if probs:
         raise PipelineError("; ".join(probs), stage=stage.key)

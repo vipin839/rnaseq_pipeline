@@ -123,6 +123,33 @@ def existing_project_fastqs(project):
 
 # ------------------------------ public data ------------------------------
 
+SC_WORDS = re.compile(r"(10x genomics|chromium (next gem )?single cell|single[- ]cell 3'|single[- ]cell 5'|"
+                      r"drop-?seq|indrop|scrna-?seq|snrna-?seq|single[- ]nucle(us|i) rna|cel-?seq|"
+                      r"smart-?seq|split-?seq|sci-rna)", re.I)
+
+
+def single_cell_samples(project, sample_ids):
+    """{sample: reason} for registered samples whose stored metadata says single-cell."""
+    out = {}
+    for sid in sample_ids:
+        rec = project.samples[sid]
+        reason = single_cell_reason({**(rec.get("metadata") or {})})
+        if reason:
+            out[sid] = reason
+    return out
+
+
+def single_cell_reason(run):
+    """Why a run looks like single-cell RNA-seq (None if it looks like bulk)."""
+    src = (run.get("library_source") or "").upper()
+    if "SINGLE CELL" in src:
+        return f"library source is '{run['library_source']}'"
+    for field in ("library_construction_protocol", "experiment_title", "study_title", "library_name"):
+        m = SC_WORDS.search(run.get(field) or "")
+        if m:
+            return f"{field.replace('_', ' ')} mentions '{m.group(0)}'"
+    return None
+
 def _runs_for_experiments(srx_list):
     """Runs for many SRA experiments: query each parent study once instead of every experiment."""
     wanted, runs, done_studies = set(srx_list), [], set()
@@ -234,6 +261,10 @@ def show_public(runs, titles):
         warnings.append("mixture of paired and single-end runs (not supported in one project)")
     if any(s not in ("RNA-Seq", "?") for s in strategies):
         warnings.append(f"library strategy is not RNA-Seq for some runs: {strategies}")
+    sc = [r for r in runs if single_cell_reason(r)]
+    if sc:
+        warnings.append(f"{len(sc)} of {len(runs)} run(s) are SINGLE-CELL RNA-seq "
+                        f"({single_cell_reason(sc[0])}); this bulk pipeline cannot analyse them")
     exps = [r.get("experiment_accession") for r in runs]
     if len(set(exps)) < len(exps):
         warnings.append("some experiments have several runs (lanes/technical replicates); they can be "
@@ -250,6 +281,7 @@ def register_public(project, runs, source):
     for r in runs:
         meta = {k: r.get(k, "") for k in ("experiment_accession", "sample_accession", "study_accession",
                                           "library_strategy", "library_source", "library_selection",
+                                          "library_construction_protocol",
                                           "instrument_model", "scientific_name", "tax_id", "sample_title",
                                           "sample_alias", "experiment_title", "read_count")}
         meta.update({f"geo_{k}": v for k, v in r.get("_geo", {}).items()})

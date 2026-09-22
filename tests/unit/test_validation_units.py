@@ -397,3 +397,26 @@ def test_runinfo_record_shape():
                                         "ScientificName": "Homo sapiens", "spots": "10"})
     assert rec["run_accession"] == "SRR1" and rec["experiment_accession"] == "SRX1"
     assert rec["library_layout"] == "PAIRED" and rec["_files"] == []  # no ENA URLs -> SRA download route
+
+
+# ---------------- single-cell detection / pilot size ----------------
+@pytest.mark.parametrize("run,is_sc", [
+    ({"library_source": "TRANSCRIPTOMIC SINGLE CELL"}, True),
+    ({"library_source": "TRANSCRIPTOMIC", "library_construction_protocol":
+      "Chromium Next GEM Single Cell 3' GEM, Library & Gel Bead Kit v3.1 (10X Genomics)"}, True),
+    ({"library_source": "TRANSCRIPTOMIC", "experiment_title": "Drop-seq of retina"}, True),
+    ({"library_source": "TRANSCRIPTOMIC", "library_construction_protocol": "TruSeq Stranded mRNA, polyA"}, False),
+    ({"library_source": "TRANSCRIPTOMIC", "study_title": "Bulk RNA-seq of liver"}, False),
+])
+def test_single_cell_detection(run, is_sc):
+    assert bool(data_manager.single_cell_reason(run)) is is_sc
+
+
+def test_pilot_size_limits():
+    cfg = C.load()
+    for bad in (1, 500, 999):
+        C.set_value(cfg, "download.max_reads", bad)
+        assert any("max_reads" in e for e in C.validate(cfg, 4)), bad
+    for good in (0, 1000, 500000):
+        C.set_value(cfg, "download.max_reads", good)
+        assert C.validate(cfg, 4) == [], good
