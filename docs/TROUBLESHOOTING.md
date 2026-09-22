@@ -11,8 +11,16 @@ Every failure screen shows **Problem**, **Likely cause** and **Recommended actio
 | `SINGLE-CELL DATA DETECTED` / `more than two reads per spot` | The dataset is single-cell RNA-seq (e.g. 10x Genomics Chromium: an 8 bp index read, a 28 bp cell-barcode+UMI read and the cDNA read) | This pipeline is for **bulk** RNA-seq; results on single-cell reads would be wrong. Use Cell Ranger, STARsolo or alevin-fry, or choose a bulk dataset (ENA library source `TRANSCRIPTOMIC`, not `TRANSCRIPTOMIC SINGLE CELL`) |
 | `all N sample(s) are FAILED/EXCLUDED` on a step screen | Every sample failed an earlier step (e.g. all downloads failed) | Project menu → *Continue pipeline*: it lists each sample's failure and offers **Retry** (the failed step runs again) or **Replace the data source**. Re-running a step always retries the samples that failed in it |
 | `GEO series … has no samples with sequencing data` | Microarray series, not yet public, or raw data held elsewhere (e.g. dbGaP) | Reanalysis and SuperSeries records are followed automatically; otherwise use the accession of the study that holds the raw reads |
-| `--config: file not found` / `is not valid YAML` | Wrong path or broken personal config file | Check `~/my_rnaseq.yaml`: two-space indentation, values in quotes |
-| `program not found: hisat2` (or another tool) | The tools env is missing or incomplete | Main menu 4 → Install missing components, or `./rnaseq_pipeline --check` |
+| `--config: file not found` / `is not valid YAML` | Wrong path or broken configuration file | Check the file named in the message (`--config FILE` or `~/.config/rnaseq-pipeline/config.yaml`): two-space indentation, values in quotes |
+| `program not found: hisat2` / `required software not found for this step` | The tools env is missing or incomplete | Main menu 4 → Install missing components, or `mamba env create -f "$(rnaseq-pipeline --runtime-env tools)"`, then `rnaseq-pipeline --check` |
+| `rnaseq-pipeline: command not found` after `pipx install` | `~/.local/bin` is not on PATH | `pipx ensurepath`, then open a new terminal |
+| `HEALTH: FAIL` from `--check` | A tool is installed but does not work, or R/DESeq2 is broken | The row marked FAILED names the component and the fix; usually recreate that conda environment |
+| `HEALTH: WARNING` — NCBI email not set | No `ncbi.email` in your user configuration | Add it to `~/.config/rnaseq-pipeline/config.yaml` (NCBI requires an email for E-utilities) |
+| Stage shows `INVALID` with `setting '…' changed (old -> new)` | You changed a setting that affects that stage's results | Expected. Continue the pipeline and the stage re-runs with the new value; or change the setting back |
+| `featureCounts processed … fragments but the BAM holds …` / `column sum … != featureCounts Assigned` | Counts were lost or duplicated between steps (disk full, killed process, edited file) | The stage stopped instead of producing wrong counts. Free space and resume; if it repeats, report it with the stage log |
+| `report shows … but the result files give …` | The report was edited, or results changed after the report was written | Resume; the report stage re-runs |
+| `pilot download … failed after 3 attempts` then `trying the SRA route` | ENA dropped the connection repeatedly (common on some networks) | Nothing to do if the SRA route then succeeds; the single ENA mate is kept aside as `*.other_archive` so mates never mix archives |
+| Terminal closed or `kill` during a run | — | Child processes are stopped and partial files are never used. Resume the project |
 | `PyYAML is missing` | The system Python lacks PyYAML | `python3 -m pip install --user pyyaml`, or create the conda envs (the launcher falls back to their Python) |
 | `project filesystem is vfat` | Project on a FAT32 USB disk (4 GB file limit) | Create the project on an ext4 disk (e.g. under your home directory) |
 | FASTQ `truncated file` / `gzip integrity failure` | Incomplete download or copy | Delete the file and download it again. For ENA the MD5 is re-checked |
@@ -35,6 +43,7 @@ Every failure screen shows **Problem**, **Likely cause** and **Recommended actio
 ## Getting more detail
 
 ```bash
-./rnaseq_pipeline --verbose --project DIR         # print every command
+rnaseq-pipeline --verbose --project DIR          # print every command
+rnaseq-pipeline --validate-project DIR           # what is valid, what will re-run
 less DIR/logs/command_history.log                  # all commands, exit codes and durations
 ```

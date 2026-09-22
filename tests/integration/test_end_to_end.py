@@ -330,3 +330,44 @@ def test_report_tampering_detected(project, tmp_path, tamper, expect):
     rep.write_text(tamper(rep.read_text()))
     problems = report_manager.validate(_ctx(dst))
     assert any(expect in x for x in problems), problems
+
+
+# ---------------------------------------------------------------- F15: non-interactive project health and doctor
+def _copy_project(project_dir, tmp_path):
+    dst = tmp_path / "copy"
+    shutil.copytree(project_dir, dst, symlinks=True)
+    (dst / ".lock").unlink(missing_ok=True)
+    return dst
+
+
+def test_validate_project_passes_on_finished_project(project, tmp_path):
+    p, _, cfg = project
+    r = run_cli(["--config", str(cfg), "--validate-project", str(_copy_project(p, tmp_path))], [], timeout=600)
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-2000:]
+    assert "PROJECT HEALTH: PASS" in r.stdout
+    assert FAKE_KEY not in r.stdout + r.stderr
+
+
+def test_validate_project_fails_on_edited_count_matrix(project, tmp_path):
+    p, _, cfg = project
+    dst = _copy_project(p, tmp_path)
+    m = dst / "counts" / "gene_count_matrix.tsv"
+    lines = m.read_text().splitlines()
+    cells = lines[1].split("\t")
+    cells[1] = str(int(cells[1]) + 1)       # one count changed by one read
+    lines[1] = "\t".join(cells)
+    m.write_text("\n".join(lines) + "\n")
+    r = run_cli(["--config", str(cfg), "--validate-project", str(dst)], [], timeout=600)
+    assert r.returncode == 1, r.stdout[-3000:]
+    assert "PROJECT HEALTH: FAIL" in r.stdout
+
+
+def test_health_check_runs_real_mini_job(tmp_path):
+    # --check runs HISAT2 -> samtools -> featureCounts (and the others) on a 2 kb genome, plus DESeq2 in R;
+    # network is not required for PASS/WARNING, so the result must not be FAIL on a machine with the tools.
+    env = dict(os.environ, PYTHONNOUSERSITE="1")
+    r = subprocess.run([str(LAUNCHER), "--check"], capture_output=True, text=True, timeout=900, env=env,
+                       cwd=tmp_path)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "HEALTH: FAIL" not in r.stdout
+    assert "200/200 read pairs assigned" in r.stdout, r.stdout[-4000:]

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src tests
+
+  unit:
+    # Pure-Python tests (tool-dependent tests skip themselves when the tools are absent).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit tests/security tests/failure -q
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine pytest pyyaml pipx
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Version consistency (package, CHANGELOG, recipe)
+        run: pytest tests/unit/test_release.py -q
+      - name: Clean-environment installation (venv + pipx, empty HOME, minimal PATH)
+        env:
+          RNASEQ_PACKAGING_TESTS: "1"
+        run: pytest tests/packaging -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  integration:
+    # Full pipeline with the real scientific stack, created from the environment files shipped in the package.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: src/rnaseq_pipeline/envs/rnaseq-tools.yml
+          environment-name: rnaseq-tools
+          cache-environment: true
+      - name: Create the R environment
+        run: micromamba create -y -f src/rnaseq_pipeline/envs/rnaseq-r.yml
+      - name: Tell the tests (and the CLI they launch) where the tools are
+        run: |
+          echo "RNASEQ_TOOLS_BIN=${MAMBA_ROOT_PREFIX}/envs/rnaseq-tools/bin" >> "$GITHUB_ENV"
+          echo "RNASEQ_RSCRIPT=${MAMBA_ROOT_PREFIX}/envs/rnaseq-r/bin/Rscript" >> "$GITHUB_ENV"
+          # GITHUB_PATH entries are prepended in order: add R first so the tools env (and its python) wins
+          echo "${MAMBA_ROOT_PREFIX}/envs/rnaseq-r/bin" >> "$GITHUB_PATH"
+          echo "${MAMBA_ROOT_PREFIX}/envs/rnaseq-tools/bin" >> "$GITHUB_PATH"
+      - name: Health check (functional)
+        run: ./rnaseq_pipeline --check
+      - name: All tests
+        run: ${MAMBA_ROOT_PREFIX}/envs/rnaseq-tools/bin/python -m pytest tests -q

@@ -3,8 +3,8 @@
 ## Starting
 
 ```bash
-cd ~/rnaseq_pipeline
-./rnaseq_pipeline
+rnaseq-pipeline            # after installation (docs/INSTALLATION.md)
+./rnaseq_pipeline          # or directly from a source checkout
 ```
 
 | Option | Meaning |
@@ -12,10 +12,18 @@ cd ~/rnaseq_pipeline
 | `--project DIR` | open a project directly (goes to the project menu) |
 | `--dry-run` | check tools, paths, reference, inputs and disk; print the commands; execute nothing |
 | `--auto` | skip the menu for quick stages; decisions and expensive steps still ask |
-| `--config FILE` | YAML file whose values override the defaults for new projects (for example a lab profile) |
-| `--projects-dir DIR` | where projects are listed and created (default `~/rnaseq_pipeline/projects`) |
+| `--config FILE` | YAML file whose values override the defaults and your user configuration (for example a lab profile) |
+| `--projects-dir DIR` | where projects are listed and created (default `~/rnaseq_projects`, or `projects_dir` in your user configuration) |
 | `--verbose` | also print every command and debug message on screen |
-| `--check` | run the system and dependency checks, then exit |
+| `--check` | health check: system, configuration, tools, a real mini-job through every tool and DESeq2, network. Prints `HEALTH: PASS / WARNING / FAIL`; exit code 1 only on FAIL |
+| `--quick` | with `--check`: skip the functional mini-job and network tests |
+| `--validate-project DIR` | re-verify a project without menus; prints `PROJECT HEALTH: PASS / WARNING / FAIL`; exit code 1 on FAIL |
+| `--runtime-env tools\|r` | print the path of the shipped conda environment file (for `mamba env create -f`) |
+| `--version` | print the version |
+
+Your personal settings (NCBI email and API key, `projects_dir`, `reference_store`) belong in
+`~/.config/rnaseq-pipeline/config.yaml`, which is loaded automatically; see docs/INSTALLATION.md. They are never copied
+into projects, reports, manifests or logs.
 
 Status tags: `[INFO]` information, `[OK]` validated success, `[RUNNING]` in progress, `[WARNING]` needs your attention
 but not fatal, `[ERROR]`/`[FAILED]` stopped, `[SKIPPED]` not needed (already valid, or not requested), `[ACTION]` a recommendation.
@@ -94,15 +102,25 @@ and any folder containing a FASTA + GTF pair as `[needs index]`.
 
 ## Validating a project
 
-**Main menu → 3.** Re-hashes every recorded output and re-runs the integrity checks (for example BAM quickcheck).
-It can optionally re-read every FASTQ file.
+**Main menu → 3**, or without menus:
+
+```bash
+rnaseq-pipeline --validate-project ~/rnaseq_projects/RNAseq_MyStudy
+```
+
+It re-hashes every recorded output, re-runs the integrity checks (for example BAM quickcheck), re-checks the report
+against the result files and the manifest for completeness, and looks for stored credentials. The result is
+`PROJECT HEALTH: PASS`, `WARNING` (for example not finished yet; the next step is named) or `FAIL` (stages that
+will re-run when you resume). The menu version can optionally re-read every FASTQ file.
 
 ## Changing things later
 
 * **Reference:** project menu → *Change reference*. Alignment and every later stage will re-run.
 * **Design / contrasts:** project menu → *Experimental design*. Only DESeq2 and the report re-run.
 * **Parameters:** main menu → 7, or *Change settings* on a stage screen, or edit `config/project_config.yaml`.
-  Every value is validated. Re-run the affected stage (project menu → *Re-run a specific stage*); later stages follow.
+  Every value is validated. Stages whose results depend on a changed value (for example fastp, HISAT2 or
+  featureCounts options, alpha, the log2FC threshold) are shown as INVALID with the setting named, and re-run when you
+  continue; later stages follow. Settings that do not change results (for example threads) invalidate nothing.
 * **Samples:** project menu → *Samples*. Re-include failed samples after fixing them, or exclude samples.
 
 ## Where to look

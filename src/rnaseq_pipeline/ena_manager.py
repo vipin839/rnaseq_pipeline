@@ -1,11 +1,13 @@
 """ENA Portal API: run metadata for SRA/ENA accessions and direct FASTQ download with MD5 check."""
 import gzip
 import subprocess
+import time
 from pathlib import Path
 
 from . import PipelineError, net, runner, ui
 
 FILEREPORT = "https://www.ebi.ac.uk/ena/portal/api/filereport"
+RETRY_DELAY = 5  # seconds; multiplied by the attempt number
 FIELDS = ["run_accession", "experiment_accession", "sample_accession", "study_accession",
           "secondary_study_accession", "library_layout", "library_strategy", "library_source",
           "library_selection", "library_name", "instrument_platform", "instrument_model", "read_count",
@@ -74,8 +76,11 @@ def download_run(run, out_dir, *, max_reads=0, log_file=None, retries=3):
     return out[0], (out[1] if paired else None)
 
 
-def _download_head(url, dest, n_reads, acc, log_file):
-    """PILOT MODE: stream only the first n_reads records (no full download)."""
+def _download_head(url, dest, n_reads, acc, log_file, attempts=3):
+    """PILOT MODE: stream only the first n_reads records (no full download), with retries.
+
+    Accepted only if at least one complete record arrived and the stream ended cleanly — either because
+    n_reads were read, or because the file itself is shorter (then every record in it was read)."""
     dest = Path(dest)
     if dest.exists():
         ui.skipped(f"already downloaded (pilot subset): {dest.name}")
@@ -85,23 +90,43 @@ def _download_head(url, dest, n_reads, acc, log_file):
         ui.status("DRY-RUN", f"curl -sL {url} | head -n {4 * n_reads} > {dest}")
         return dest
     part = dest.with_name(dest.name + ".part")
-    p = subprocess.Popen(["curl", "-sfL", "--retry", "3", url], stdout=subprocess.PIPE, env=runner.child_env())
-    lines = 0
-    try:
-        with gzip.GzipFile(fileobj=p.stdout) as src, gzip.open(part, "wb", compresslevel=4) as dst:
-            for line in src:
-                dst.write(line)
-                lines += 1
-                if lines >= 4 * n_reads:
-                    break
-    finally:
-        p.kill()
-        p.wait()
-    if lines % 4 != 0 or lines == 0:
+    last_problem = "unknown"
+    for attempt in range(1, attempts + 1):
+        lines, finished_early = 0, False
+        p = subprocess.Popen(["curl", "-sSfL", "--retry", "3", "--connect-timeout", "30", url],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=runner.child_env())
+        try:
+            with gzip.GzipFile(fileobj=p.stdout) as src, gzip.open(part, "wb", compresslevel=4) as dst:
+                for line in src:
+                    dst.write(line)
+                    lines += 1
+                    if lines >= 4 * n_reads:
+                        finished_early = True
+                        break
+            stream_error = None
+        except (EOFError, OSError) as e:  # truncated or corrupt gzip stream (connection dropped)
+            stream_error = f"compressed stream ended unexpectedly ({type(e).__name__})"
+        finally:
+            if finished_early:
+                p.kill()
+            err = p.stderr.read().decode(errors="replace").strip() if not finished_early else ""
+            rc = p.wait()
+        if finished_early or (rc == 0 and not stream_error and lines and lines % 4 == 0):
+            part.rename(dest)
+            from . import logger
+            logger.record_command({"stage": "data", "sample": acc, "status": "ok", "exit_codes": [0],
+                                   "command_str": f"[pilot] first {lines // 4} reads of {url} -> {dest}"})
+            if not finished_early:
+                ui.info(f"{dest.name}: the file holds only {lines // 4:,} reads (fewer than {n_reads:,}); all used")
+            return dest
         part.unlink(missing_ok=True)
-        raise PipelineError(f"pilot download of {dest.name} incomplete ({lines} lines)", sample=acc, stage="data")
-    part.rename(dest)
-    from . import logger
-    logger.record_command({"stage": "data", "sample": acc, "status": "ok", "exit_codes": [0],
-                           "command_str": f"[pilot] first {n_reads} reads of {url} -> {dest}"})
-    return dest
+        why = net.CURL_ERRORS.get(rc, (f"curl exit code {rc}", True))[0] if rc else (stream_error or
+                                                                                      f"{lines} lines received")
+        last_problem = f"{why}{': ' + err[:160] if err else ''}"
+        if attempt < attempts:
+            ui.warn(f"{dest.name}: {last_problem}; retrying in {RETRY_DELAY * attempt} s ({attempt}/{attempts})")
+            time.sleep(RETRY_DELAY * attempt)
+    raise PipelineError(f"pilot download of {dest.name} failed after {attempts} attempts", sample=acc,
+                        stage="data", cause=last_problem,
+                        remedy="the archive may be slow or temporarily unavailable; resume the project later "
+                               "(samples already downloaded are kept)")

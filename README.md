@@ -1,71 +1,79 @@
-# Bulk RNA-seq Pipeline — Version 1.0.0
+# Bulk RNA-seq Pipeline (`rnaseq-pipeline`)
 
-An interactive, terminal-based pipeline for bulk RNA-seq, from public accessions or local FASTQ files
-to differential expression results and a final HTML report.
+An interactive, terminal-based pipeline for **bulk** RNA-seq: from public accessions (SRA, GEO, ENA) or local FASTQ files
+to differential-expression results, plots and an HTML report.
 
-* **Python** runs everything up to the gene count matrix: download/import, FASTQ validation, FastQC/MultiQC,
-  the quality gate, fastp, reference preparation, HISAT2, BAM validation and QC, strandedness, StringTie2 and featureCounts.
-* **R** runs DESeq2 and everything after it: normalisation, statistics, up/down genes, and plots.
-* One launcher, `./rnaseq_pipeline`, with menus that guide you through each step.
-* Every stage is validated, checkpointed and resumable, and every command is logged.
+* **Python** does everything up to the gene count matrix: download/import, FASTQ validation, FastQC/MultiQC, the quality gate,
+  fastp, reference preparation, HISAT2, BAM validation and QC, strandedness, StringTie2 and featureCounts.
+* **R** runs DESeq2 and everything after it: normalisation, tests, up/down genes, and plots.
+* Every stage **validates its outputs independently** (for example, FASTQ reads = HISAT2 reads = BAM primary records;
+  count-matrix column sums = featureCounts assigned reads; up/down tables re-derived from the full result table).
+* **Checkpoints** make interrupted runs resumable. A changed input, output or scientific setting re-runs exactly the
+  affected stages.
+* Scientific decisions (trimming, strandedness, experimental design) are **never guessed**; you confirm each one, with
+  an explanation.
 
 ```
-DATA (SRA / GEO / ENA / local) -> FASTQ validation -> FastQC + MultiQC -> quality gate
+DATA (SRA / GEO / ENA / local, or search NCBI) -> FASTQ validation -> FastQC + MultiQC -> quality gate
   -> [fastp -> validation -> FastQC + MultiQC]  (only if you decide to trim)
-  -> reference preparation (validated genome + GTF, HISAT2 index)
-  -> HISAT2 | samtools sort -> BAM validation -> BAM QC -> strandedness
-  -> StringTie2 (transcript TPM)   and   featureCounts (gene counts)      <- parallel, independent
-  -> count matrix -> experimental design (you confirm) -> R / DESeq2 -> plots -> HTML report
+  -> reference (catalog, any organism from NCBI, or your own FASTA + GTF; validated; HISAT2 index)
+  -> HISAT2 | samtools sort -> BAM validation -> BAM QC -> strandedness (inferred, confirmed)
+  -> StringTie2 (transcript TPM)   and   featureCounts (gene counts)      <- independent
+  -> count matrix -> experimental design (you confirm) -> DESeq2 -> plots -> validated HTML report + manifest
 ```
 
-## Quick start
+## Install
 
 ```bash
-cd ~/rnaseq_pipeline
-./rnaseq_pipeline            # interactive menu
-./rnaseq_pipeline --check    # check the system and software, then exit
-./rnaseq_pipeline --dry-run --project projects/RNAseq_MyStudy   # show what would run, execute nothing
+pipx install git+https://github.com/vipin839/rnaseq_pipeline.git         # the command
+mamba env create -f "$(rnaseq-pipeline --runtime-env tools)"               # FastQC, HISAT2, samtools, ...
+mamba env create -f "$(rnaseq-pipeline --runtime-env r)"                   # R + DESeq2
+rnaseq-pipeline --check                                                    # functional health check
 ```
 
-Choose **1. Start New RNA-seq Project** and follow the prompts. If the program is closed or the computer
-restarts, choose **2. Resume Existing Project**. Completed stages are revalidated, not recomputed.
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for conda setup, the Bioconda recipe (one-command install after it
+is published), user settings and upgrading from 1.0.0.
+
+## Use
+
+```bash
+rnaseq-pipeline                              # interactive menu
+rnaseq-pipeline --project ~/rnaseq_projects/RNAseq_MyStudy   # resume a project
+rnaseq-pipeline --validate-project DIR       # re-verify a project: PROJECT HEALTH PASS / WARNING / FAIL
+rnaseq-pipeline --dry-run --project DIR      # show what would run, execute nothing
+rnaseq-pipeline --check                      # installation health check
+```
+
+## What is supported
+
+| | Status | Notes |
+|---|---|---|
+| Bulk RNA-seq, paired-end or single-end, Illumina | **Supported** | the layout must be the same for all samples in a project |
+| Unstranded / forward / reverse libraries | **Supported** | inferred with RSeQC and confirmed; all three tested end to end |
+| Human, mouse, yeast (catalog); any organism with an NCBI GTF; custom FASTA + GTF | **Supported** | genome and annotation compatibility is checked (names, lengths, assembly) |
+| Bacteria (CDS-only NCBI annotation) | **Supported** | counts CDS; StringTie2 skipped; tested with E. coli UTI89 |
+| Designs `~ condition`, `~ batch + condition`, several groups/contrasts | **Supported** | ≥2 biological replicates per group; confounding refused |
+| Lanes / technical replicates | **Supported** | summed on request |
+| Time course (LRT), interactions, continuous covariates | **Not supported** | planned |
+| Mixed layouts or organisms in one project | **Refused** | use separate projects |
+| Single-cell RNA-seq (10x, Drop-seq, Smart-seq, …) | **Refused** | detected from metadata and read structure; use Cell Ranger / STARsolo / alevin-fry |
+| Human-scale data on a small machine | **Partially** | the index is built without splice sites below ~160 GB RAM (sites are given at alignment); ~8 GB RAM needed to align |
+| GO / Reactome enrichment | **Partially** | optional; needs extra R packages; not part of the tested core |
+| macOS, Windows (native) | **Not supported** | Linux and WSL2 only |
+| Web interface, HPC schedulers, containers | **Not supported** | future versions |
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installing the software (no administrator rights needed) |
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Step-by-step use, menus, resuming, changing references/design, logs |
-| [docs/PIPELINE_METHODS.md](docs/PIPELINE_METHODS.md) | What every stage does, why, parameters, thresholds and validation checks |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common errors and how to fix them |
-| [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Architecture, adding stages/aligners, tests, the roadmap for Version 2 and 3 |
-| [CHANGELOG.md](CHANGELOG.md) | Version history |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | install options, runtime layer, user settings, upgrading |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | step-by-step use, menus, decisions, resuming, logs |
+| [docs/PIPELINE_METHODS.md](docs/PIPELINE_METHODS.md) | what each stage does, parameters, thresholds, validation |
+| [docs/VERIFICATION_MATRIX.md](docs/VERIFICATION_MATRIX.md) | requirement → code → tests → evidence → status |
+| [docs/TESTING.md](docs/TESTING.md) | test suites, synthetic truth data, real-data evidence |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | errors and fixes |
+| [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | architecture and extension points |
+| [docs/RELEASE.md](docs/RELEASE.md) | release procedure (tag, PyPI, Bioconda) |
+| [CHANGELOG.md](CHANGELOG.md) | version history |
 
-## Project layout (created per analysis)
-
-```
-RNAseq_<name>/
-  config/          project_config.yaml (edit this) + config_used_<time>.yaml per run
-  data/            fastq/ (raw, linked or copied), trimmed/, raw/ (.sra), metadata/
-  reference/       links to the shared reference store + reference_manifest.yaml
-  qc/              fastqc_raw/, multiqc_raw/, fastqc_trimmed/, multiqc_trimmed/, assessment/, fastp/
-  alignment/       bam/ (sorted + indexed), reports/ (HISAT2, samtools, alignment_summary.tsv)
-  stringtie/       <sample>/, abundance/, merged/ (TPM matrices)
-  featurecounts/   featurecounts.txt, featurecounts.summary
-  counts/          gene_count_matrix.tsv/.csv, sample_metadata.tsv, design.json
-  results/         deseq2/<contrast>/, upregulated/, downregulated/, plots/, tables/
-  logs/            pipeline.log, pipeline_errors.log, command_history.log, commands.jsonl
-  reports/         final_pipeline_report.html
-  checkpoints/     one JSON per completed stage
-  pipeline_manifest/  manifest.json/.yaml, environment.yml, package versions, R sessionInfo
-```
-
-## Tests
-
-```bash
-~/miniforge3/envs/rnaseq-tools/bin/python -m pytest tests -q
-```
-
-There are 111 tests: unit, failure-injection, and an end-to-end run through the real interactive CLI on a synthetic
-dataset with known differential expression. The end-to-end test checks that the true DE genes are recovered
-and that strandedness is inferred correctly.
+License: MIT.

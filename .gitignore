@@ -5,3 +5,7 @@ projects/
 *.lock
 .lock
 RNAseq_*/
+build/
+dist/
+*.egg-info/
+.ruff_cache/

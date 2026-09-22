@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "rnaseq-pipeline"
 dynamic = ["version"]
 description = "Interactive, validated and resumable bulk RNA-seq pipeline (HISAT2, featureCounts, StringTie2, DESeq2)"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "vipin839" }]
 requires-python = ">=3.10"
 # Only the application layer is a pip dependency. The scientific runtime (FastQC, HISAT2, samtools,
@@ -19,7 +20,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

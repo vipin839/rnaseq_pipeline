@@ -173,6 +173,15 @@ class Stage:
         return []
 
 
+def _set_aside_partial_pair(project, acc):
+    """Before switching archive for a run, move any mate file already fetched from the other archive aside so
+    both mates always come from the same source (never overwritten, never mixed)."""
+    for f in project.path("data", "fastq").glob(f"{acc}*.fastq.gz"):
+        target = f.with_name(f.name + ".other_archive")
+        os.replace(f, target)
+        ui.info(f"kept {f.name} aside as {target.name} (mates must come from one archive)")
+
+
 class DataStage(Stage):
     key, title, expensive = "data_acquired", "DATA DOWNLOAD / IMPORT", True
     settings = ("download.source_preference", "download.max_reads", "import_mode")
@@ -239,9 +248,22 @@ class DataStage(Stage):
                 else:
                     run = {"run_accession": rec["accession"], "library_layout": rec["layout"],
                            "_files": [tuple(f) for f in rec["download"]["files"]]}
-                    r1, r2 = ena_manager.download_run(run, p.path("data", "fastq"), max_reads=max_reads,
-                                                      log_file=ctx.log("data", sid),
-                                                      retries=int(ctx.cfg["download"].get("retries", 3)))
+                    try:
+                        r1, r2 = ena_manager.download_run(run, p.path("data", "fastq"), max_reads=max_reads,
+                                                          log_file=ctx.log("data", sid),
+                                                          retries=int(ctx.cfg["download"].get("retries", 3)))
+                    except PipelineError as ena_err:
+                        if runner.which("fasterq-dump") is None or runner.which("fastq-dump") is None:
+                            raise
+                        ui.warn(f"{sid}: ENA download failed ({ena_err}); the same run is mirrored at NCBI SRA — "
+                                "trying the SRA route")
+                        _set_aside_partial_pair(p, rec["accession"])
+                        rec["source"] = "sra"
+                        p.save()
+                        r1, r2 = sra_manager.download_run(rec["accession"], p.path("data", "raw"),
+                                                          p.path("data", "fastq"), p.path("temp"), ctx.threads,
+                                                          rec["layout"] == "PAIRED", max_reads=max_reads,
+                                                          log_file=ctx.log("data", sid))
                 if not ctx.dry_run:
                     rec["r1"] = p.rel(r1)
                     rec["r2"] = p.rel(r2) if r2 else None

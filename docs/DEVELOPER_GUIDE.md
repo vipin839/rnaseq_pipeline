@@ -3,31 +3,40 @@
 ## Layout
 
 ```
-rnaseq_pipeline            bash launcher (sets PYTHONNOUSERSITE, execs rnaseq_pipeline.py)
-rnaseq_pipeline.py         entry point (Python version / PyYAML check, then rnaseq.cli.main)
-python/rnaseq/
-  cli.py                   menus, wizard, argparse           (the only module that talks to the user at length)
-  workflow.py              Stage classes, STAGES order, checkpoint/resume logic, stage screens
-  ui.py / logger.py        status output, prompts / log files, command history
-  runner.py                safe subprocess execution (argument lists, pipefail, logging, Ctrl-C handling, dry-run)
-  config.py                load/merge/validate/snapshot YAML config
+pyproject.toml             package metadata; console scripts rnaseq-pipeline / rnaseq_pipeline
+rnaseq_pipeline, rnaseq_pipeline.py   run from a checkout without installing
+src/rnaseq_pipeline/
+  __init__.py              __version__ (single source), PACKAGE_DIR, PipelineError, Terminated, signal handlers
+  __main__.py              python -m rnaseq_pipeline
+  cli.py                   menus, wizard, argparse (--check, --validate-project, --runtime-env, ...)
+  workflow.py              Stage classes, STAGES order, checkpoints/resume, settings invalidation, stage screens
+  doctor.py                --check: system/config/tools + functional mini-jobs + R/DESeq2 + network
+  project_health.py        --validate-project and main menu 3
+  secrets.py               credential redaction (projects, snapshots, manifest, report, logs, terminal)
+  ui.py / logger.py        status output, prompts, decision explanations / log files, command history
+  runner.py                safe subprocess execution (argument lists, pipefail, logging, signals, dry-run)
+  config.py                load/merge (default < user config < --config), validate, snapshot
   project.py               project layout, project.json state, lock
-  checkpoint.py            checkpoint write/verify, content fingerprints
+  checkpoint.py            checkpoint write/verify, content fingerprints, manifest file fingerprints
   system_check.py          OS/CPU/RAM/disk/filesystem detection
-  environment_manager.py   conda env discovery, creation, exports
+  environment_manager.py   conda env discovery, creation, exports; ENV_FILES (package data)
   dependency_manager.py    tool/R package detection, versions, install plans
-  data_manager.py / ena_manager.py / sra_manager.py / geo_manager.py / net.py   data sources
-  fastq_validator.py       streaming FASTQ validation (multiprocess)
+  data_manager.py / ena_manager.py / sra_manager.py / geo_manager.py / entrez.py / net.py   data sources
+  fastq_validator.py       streaming FASTQ validation (terminable multiprocessing pool)
   qc_manager.py / quality_assessment.py / trimming.py
-  reference_manager.py     catalog, download+checksums, FASTA/GTF validation, compatibility, HISAT2 index
+  reference_manager.py     catalog, NCBI search, downloads + checksums, FASTA/GTF validation, compatibility,
+                           prepare() (stage + standalone), HISAT2 index, scan_store()
   alignment.py / bam_manager.py / strandedness.py / stringtie.py / featurecounts.py / count_matrix.py
   design.py                metadata editing + design validation (rank check)
-  r_bridge.py              params.json -> Rscript -> output validation
-  storage.py / manifest.py / report_manager.py
-R/  deseq2_pipeline.R (entry) + qc_plots.R, differential_expression.R, visualization.R, downstream_analysis.R
-config/ default_config.yaml, reference_catalog.yaml
-envs/   rnaseq-tools.yml, rnaseq-r.yml
-tests/  unit/, failure/, integration/ (+ data/make_synthetic.py)
+  r_bridge.py              params.json -> Rscript -> independent output validation
+  storage.py / manifest.py / report_manager.py (report + its validator)
+  R/                       deseq2_pipeline.R (entry) + qc_plots.R, differential_expression.R, visualization.R,
+                           downstream_analysis.R
+  config/                  default_config.yaml, reference_catalog.yaml
+  envs/                    rnaseq-tools.yml, rnaseq-r.yml (runtime layer)
+packaging/bioconda/        Bioconda recipe + sha256 helper
+.github/workflows/ci.yml   lint, unit (Ubuntu 22.04/24.04 x Python 3.10-3.13), packaging, integration
+tests/  unit/ security/ failure/ integration/ packaging/ data/make_synthetic.py
 ```
 
 ## Principles
@@ -39,11 +48,12 @@ tests/  unit/, failure/, integration/ (+ data/make_synthetic.py)
 * **Outputs are written to `*.partial` / `*.part` / `*.building` and renamed only after validation.**
 * **A stage writes its checkpoint only after post-validation.** The checkpoint fingerprint is content-based (outputs + params),
   so re-running a stage with identical results does not invalidate later stages.
-* Every scientific parameter lives in `config/default_config.yaml` and is validated in `config.validate`.
+* Every scientific parameter lives in `src/rnaseq_pipeline/config/default_config.yaml` and is validated in `config.validate`.
 
 ## Adding a stage
 
-1. Subclass `workflow.Stage`: set `key` (checkpoint name), `title`, `depends`, `expensive`, `settings`, and implement
+1. Subclass `workflow.Stage`: set `key` (checkpoint name), `title`, `depends`, `expensive`, `settings`,
+   `result_settings` (settings whose change must invalidate the stage), `required_tools(ctx)`, and implement
    `overview`, `check_inputs`, `estimate_gb`, `execute(ctx) -> (outputs, params, summary)` and optionally `revalidate`.
    `execute` must handle `ctx.dry_run` (commands only).
 2. Insert an instance into `STAGES` at the right position.
@@ -72,8 +82,8 @@ decision inputs, which is the main refactor to plan for.
 ## Tests
 
 ```bash
-~/miniforge3/envs/rnaseq-tools/bin/python -m pytest tests -q                 # everything (~2 min)
-~/miniforge3/envs/rnaseq-tools/bin/python -m pytest tests/unit tests/failure # fast
+pytest tests                                         # everything (~6 min; needs the tools)
+pytest tests/unit tests/security tests/failure       # fast; see docs/TESTING.md
 python3 tests/data/make_synthetic.py OUTDIR 150000                            # generate the synthetic dataset
 ```
 
@@ -82,4 +92,4 @@ The integration test drives the real CLI with scripted answers. If you add or re
 
 ## Versioning
 
-Semantic versioning in `VERSION`. Record changes in `CHANGELOG.md`. Checkpoints and the manifest store the pipeline version.
+Semantic versioning; the single source is `__version__` in `src/rnaseq_pipeline/__init__.py` (see docs/RELEASE.md). Record changes in `CHANGELOG.md`. Checkpoints and the manifest store the pipeline version.

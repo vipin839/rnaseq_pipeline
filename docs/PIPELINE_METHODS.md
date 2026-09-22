@@ -1,6 +1,6 @@
 # Pipeline Methods
 
-For each stage: the biological purpose, what is computed, the key parameters (all in `config/default_config.yaml`),
+For each stage: the biological purpose, what is computed, the key parameters (all in `src/rnaseq_pipeline/config/default_config.yaml`),
 and the validation that must pass before the stage's checkpoint is written. A stage is never reported as successful
 just because an output file exists.
 
@@ -16,6 +16,13 @@ just because an output file exists.
 * If ENA has not mirrored a run (common for very recent studies) the SRA route is used automatically.
 * Local: symlink (default) or copy. Originals are never written to.
 * Pilot mode (`download.max_reads`) streams only the first N reads. It is for **testing only** and is flagged in the report and manifest.
+  Interrupted streams are retried (3 attempts, increasing delay). If ENA keeps failing for a run, that run is taken
+  from NCBI SRA instead (`fastq-dump -X N`); any mate already streamed from ENA is set aside as `*.other_archive`, so both
+  mates always come from the same archive.
+* Downloads without a provider checksum are still checked for emptiness and the size ENA reports. If a server cannot
+  resume (curl 33) the download restarts from zero. Permanent errors (HTTP 404) are not retried.
+* One organism per project: a selection spanning several organisms is refused (one reference cannot serve both).
+* Every input file is fingerprinted in the manifest (SHA-256; for files over 50 MB, SHA-256 of size + first and last MiB).
 
 ## 2. FASTQ verification (streaming, constant memory)
 Every record of every file is read: `@` header, `+` separator (and its optional ID matches), sequence alphabet
@@ -110,11 +117,16 @@ Validation: program header, fixed columns, sample columns equal to the BAM list 
 non-negative values, **gene count = number of genes in the GTF**. Assignment below 30 % gives a warning (check strandedness,
 annotation, rRNA).
 
+*Reconciliation with the alignment (independent layer):* for each sample, featureCounts' total must be at least the number
+of fragments entering alignment (reads for single-end), `Assigned` can never exceed it, and a total above fragments +
+secondary/supplementary alignments gives a warning. A violation stops the stage.
+
 ## 12. Count matrix
 The annotation columns are removed and columns are renamed to sample IDs. Counts must be integers (fractional counting is refused).
 If runs share a biological sample, the user may sum them, the recommended handling of lanes/technical replicates (the per-run matrix is kept).
 Validation: header, unique sample and gene IDs, no annotation columns, no NA/negative/non-integer values, expected dimensions,
-no zero-library samples.
+no zero-library samples, and **every column sum equals featureCounts `Assigned` for that sample** (checked before and after
+the file is written; with summed technical replicates, the sum of their `Assigned`).
 
 ## 13. Experimental design
 Stored in `counts/sample_metadata.tsv` + `counts/design.json` (with the metadata SHA-256, so DESeq2 refuses a design that was
@@ -136,11 +148,26 @@ of freedom. The design is re-checked in R (`--validate-only`) before being confi
 7. Exploratory plots use a VST (or rlog) with `blind = TRUE`: PCA (top 500 variable genes), sample distance and
    correlation heatmaps, library sizes, normalised count distributions. Per contrast: MA, volcano, significant-gene heatmap
    (z-scores, capped at `heatmap_max_genes`), and a top-N heatmap. PNG (300 dpi) + PDF. The data behind every plot is saved as TSV.
-8. Python then validates the outputs: every file exists, the table sizes match the summary, and every up/down gene actually satisfies the thresholds.
+8. Python then validates the outputs: every file exists, the table sizes match the summary, and the up, down and
+   significant sets are **re-derived from the full result table** (padj < alpha and |log2FC| ≥ threshold, direction by sign).
+   A gene missing from or wrongly added to a table, or labelled with the wrong direction, stops the stage.
 
 ## 15. Optional enrichment
 If enabled and the packages are installed: clusterProfiler `enrichGO` (BP) and ReactomePA `enrichPathway` (human/mouse) on the up
 and down gene sets, against the tested-gene universe. It is never required for the core results.
+
+## Report and manifest
+The HTML report marks every key number (active samples, reference, strandedness, formula, alpha, log2FC threshold, and
+per contrast the tested/up/down/significant counts). After writing, the report is re-read and each marked number is
+compared with the value re-derived from the result files; every link and image must exist, the document must be complete,
+and no template placeholder may remain. A pilot-subset run is labelled as such at the top. The manifest records software
+versions, the redacted configuration, the design, input-file fingerprints, provider MD5s, the genome and annotation
+SHA-256, where the reference came from, and the command log. `--validate-project` repeats all of these checks.
+
+## Settings and resume
+Each stage records the settings its results depend on. If one changes, the stage and everything after it are marked
+INVALID with the setting named and re-run on resume. Settings that cannot change results (threads, memory) invalidate
+nothing.
 
 ## Storage estimates
 Trimmed FASTQ ≈ 0.9× raw; sorted BAM ≈ 0.8× FASTQ.gz plus sort temp ≈ the largest sample; `fasterq-dump` temp ≈ 8× `.sra`.
