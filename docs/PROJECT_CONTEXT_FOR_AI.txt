@@ -3,9 +3,9 @@ BULK RNA-seq ANALYSIS PIPELINE — COMPLETE PROJECT CONTEXT (for humans and AI a
 ================================================================================================
 Repository : https://github.com/vipin839/rnaseq_pipeline   (branch: main)
 Local path : ~/rnaseq_pipeline   (Ubuntu 24.04 under WSL2 on the author's laptop)
-Version    : 1.0.0 line (VERSION file), with follow-up fixes up to commit 08a9c11 (2026-09-22)
+Version    : 1.1.0 (single source: __version__ in src/rnaseq_pipeline/__init__.py), 2026-09-22
 Languages  : Python 3.10+ (pre-processing, orchestration)  +  R 4.x (DESeq2 and downstream)
-Size       : ~8,000 lines (Python package ~7,600, R ~450), 127 automated tests
+Size       : installable Python package + R scripts; 204 automated tests
 Document   : docs/PROJECT_CONTEXT_FOR_AI.txt — one self-contained description of the project:
              purpose, theory, architecture, workflow, usage, validation, history, limits, roadmap.
 
@@ -156,24 +156,31 @@ B.11 Bulk vs single-cell (why single-cell is refused)
 PART C — ARCHITECTURE
 ================================================================================================
 C.1 Repository layout
-  rnaseq_pipeline               bash launcher (sets PYTHONNOUSERSITE=1, execs rnaseq_pipeline.py)
-  rnaseq_pipeline.py            entry: checks Python ≥3.10 + PyYAML (falls back to the conda env
-                                Python if PyYAML missing), then rnaseq.cli.main()
-  VERSION, CHANGELOG.md, README.md, .gitignore, .gitattributes (LF line endings)
-  config/default_config.yaml    every parameter with comments (see Part G)
-  config/reference_catalog.yaml reference packages (URLs, checksums, sizes)
-  envs/rnaseq-tools.yml         conda env: FastQC, MultiQC, fastp, HISAT2, samtools, StringTie,
-                                Subread (featureCounts), SRA Toolkit, RSeQC, pigz, pytest
-  envs/rnaseq-r.yml             conda env: R, DESeq2, EnhancedVolcano, apeglm, ggplot2, pheatmap,
-                                ggrepel, RColorBrewer, data.table, dplyr, tibble, readr, jsonlite
-  python/rnaseq/                the Python package (below)
-  R/                            deseq2_pipeline.R (entry), qc_plots.R, differential_expression.R,
-                                visualization.R, downstream_analysis.R
+  pyproject.toml                package metadata (MIT); console scripts rnaseq-pipeline and
+                                rnaseq_pipeline -> rnaseq_pipeline.cli:main; python -m rnaseq_pipeline
+  rnaseq_pipeline               bash launcher for a source checkout (PYTHONNOUSERSITE=1)
+  rnaseq_pipeline.py            checkout entry: adds src/ to sys.path, checks Python >=3.10 + PyYAML
+  CHANGELOG.md, README.md, LICENSE, .gitignore, .gitattributes (LF line endings)
+  src/rnaseq_pipeline/          the Python package (below), with package data:
+    config/default_config.yaml    every parameter with comments (see Part G)
+    config/reference_catalog.yaml reference packages (URLs, checksums, sizes)
+    envs/rnaseq-tools.yml         conda env: FastQC, MultiQC, fastp, HISAT2, samtools, StringTie,
+                                  Subread (featureCounts), SRA Toolkit, RSeQC, pigz, pytest
+    envs/rnaseq-r.yml             conda env: R, DESeq2, apeglm, plotting and table packages
+    R/                            deseq2_pipeline.R (entry), qc_plots.R, differential_expression.R,
+                                  visualization.R, downstream_analysis.R
+  packaging/bioconda/           Bioconda recipe (lint passes; not submitted) + update_sha256.sh
+  .github/workflows/ci.yml      lint, unit (Ubuntu 22.04/24.04 x Python 3.10-3.13), package, integration
   docs/                         INSTALLATION, USER_GUIDE, PIPELINE_METHODS, TROUBLESHOOTING,
-                                DEVELOPER_GUIDE, this file
-  tests/                        unit/, failure/, integration/, data/make_synthetic.py
+                                DEVELOPER_GUIDE, TESTING, RELEASE, VERIFICATION_MATRIX, this file
+  tests/                        unit/, security/, failure/, integration/, packaging/, data/make_synthetic.py
+  User state: ~/.config/rnaseq-pipeline/config.yaml (personal settings, loaded automatically),
+  ~/rnaseq_projects (default projects_dir), ~/.rnaseq_pipeline (install logs; $RNASEQ_PIPELINE_HOME).
 
-C.2 Python modules (python/rnaseq/) and responsibilities
+C.2 Python modules (src/rnaseq_pipeline/) and responsibilities
+  doctor.py              --check: functional mini-job through every tool + DESeq2; HEALTH PASS/WARNING/FAIL
+  project_health.py      --validate-project / menu 3: PROJECT HEALTH PASS/WARNING/FAIL
+  secrets.py             credentials never stored or logged (redact, scrub, strip_user_settings)
   cli.py                 menus, new-project wizard, data/reference selection, resume/validate,
                          dependency & reference management, configuration editor, argparse
   workflow.py            the state machine: 15 Stage classes, stage screens, checkpoints,
@@ -367,10 +374,11 @@ Key settings (default):
 PART H — USING THE TOOL (PRACTICAL)
 ================================================================================================
 H.1 Start
-  cd ~/rnaseq_pipeline && ./rnaseq_pipeline --config ~/my_rnaseq.yaml
+  rnaseq-pipeline                     (installed; personal settings from ~/.config/rnaseq-pipeline/config.yaml)
+  cd ~/rnaseq_pipeline && ./rnaseq_pipeline --config ~/my_rnaseq.yaml   (from a checkout)
   (If "Permission denied": bash rnaseq_pipeline  — happens when cloned onto a Windows/NTFS drive.)
   Flags: --project DIR · --dry-run · --auto · --config FILE · --projects-dir DIR · --verbose ·
-         --check · --version
+         --check [--quick] · --validate-project DIR · --runtime-env tools|r · --version
 H.2 Main menu
   1 Start New RNA-seq Project · 2 Resume Existing Project · 3 Validate Existing Project ·
   4 Manage Dependencies / Environment · 5 Manage Reference Databases · 6 View Previous Reports ·
@@ -435,7 +443,8 @@ PART J — SAFEGUARDS, ERROR HANDLING, RESUME, RECOVERY
 ================================================================================================
 PART K — TESTING AND VALIDATION EVIDENCE
 ================================================================================================
-  Run: ~/miniforge3/envs/rnaseq-tools/bin/python -m pytest tests -q   (≈2 min; 127 tests)
+  Run: pytest tests   (≈5 min; 204 tests: unit 122, security 8, failure 31, integration 35,
+  packaging 8 gated by RNASEQ_PACKAGING_TESTS=1). Details: docs/TESTING.md and VERIFICATION_MATRIX.md.
   - Unit (58+): validators, config rules, FASTQ validator (truncation, gzip corruption, mate
     mismatch, bad characters, Phred+64), pairing, GEO parsing (incl. reanalysis/SuperSeries),
     count-matrix rejections, design (replicates, confounding, formulas), checkpoints (tamper,
@@ -451,7 +460,14 @@ PART K — TESTING AND VALIDATION EVIDENCE
     "reverse", matrix shape, ≥14/16 true DE recovered with ≤1 false positive (observed 16/16, 0),
     plots, report, manifest, resume re-runs nothing, dry-run executes nothing, corrupted FASTQ
     stops before alignment.
+  1.1.0 additions: credential leak tests, SIGTERM/SIGHUP, download failures (404, empty, size,
+  MD5, no-resume restart), pilot retries + ENA->SRA fallback, featureCounts/matrix reconciliation,
+  DESeq2 up/down re-derivation, report tampering, 13-scenario resume-invalidation matrix,
+  unstranded/forward/single-end libraries end to end, --check and --validate-project.
   Real-data validations performed:
+  - Yeast SRP314352 (low vs high glucose, 2 vs 2, pilot 200k, v1.1.0): ENA drops recovered by
+    retries, one run via SRA fallback; all invariants hold; reverse stranded; HXT6 +9.3, SUC2 +6.5,
+    CTA1 +5.4, HXT7 +5.0, JEN1 +4.9, HXT2 +4.4 log2FC up in low glucose; PROJECT HEALTH: PASS.
   - Yeast GSE53720 (calorie restriction vs normal, pilot 500k reads): forward strandedness
     inferred; ADH2 +8.9, JEN1 +7.1, FBP1 +5.8, PCK1 +4.3, SUC2 +2.4 log2FC up (biologically
     correct); ~68% alignment explained by rRNA (rDNA locus chrXII).
@@ -465,9 +481,11 @@ PART L — INSTALLATION AND ENVIRONMENT
 ================================================================================================
   1 Miniforge:  curl -L -O https://github.com/conda-forge/miniforge/releases/latest/download/
                 Miniforge3-Linux-x86_64.sh && bash Miniforge3-Linux-x86_64.sh -b -p ~/miniforge3
-  2 Envs:       ~/miniforge3/bin/mamba env create -f envs/rnaseq-tools.yml
-                ~/miniforge3/bin/mamba env create -f envs/rnaseq-r.yml
-  3 Check:      ./rnaseq_pipeline --check    (or main menu 4, which can install after asking)
+  0 App:        pipx install git+https://github.com/vipin839/rnaseq_pipeline.git   (verified)
+  2 Envs:       ~/miniforge3/bin/mamba env create -f "$(rnaseq-pipeline --runtime-env tools)"
+                ~/miniforge3/bin/mamba env create -f "$(rnaseq-pipeline --runtime-env r)"
+  3 Check:      rnaseq-pipeline --check    (or main menu 4, which can install after asking)
+  Bioconda (one command incl. all tools) is prepared but NOT published; PyPI not published.
   No activation needed; the tool finds envs under ~/miniforge3/envs. No sudo ever.
   Tested versions: FastQC 0.12.1, MultiQC 1.35, fastp 1.3.7, HISAT2 2.2.3, samtools 1.24,
   StringTie 3.0.3 (StringTie2 line), featureCounts 2.1.1, SRA Toolkit 3.4.1, RSeQC 5.0.5,
@@ -494,6 +512,11 @@ PART M — HISTORY
   2026-09-22 558a060  GEO reanalysis/SuperSeries resolution; no dead-end without inputs.
   2026-09-22 08a9c11  Single-cell detection/refusal; retry failed samples on re-run; replace data
                       source; no stage-screen loop; clean --config errors; pilot ≥1000 reads.
+  2026-09-22 ca7c8e4  Restructure into installable package src/rnaseq_pipeline (pyproject, MIT).
+  2026-09-22 0fed5d2  Hardening: credentials never stored/logged, settings-based invalidation,
+                      SIGTERM/SIGHUP, download robustness, count reconciliation, report validation.
+  2026-09-22 fa5c546  Doctor (--check), --validate-project, library-type tests, pre-flights.
+  2026-09-22 670011e  CI, Bioconda recipe, pilot retries + ENA->SRA fallback, release docs (1.1.0).
 
 ================================================================================================
 PART N — KNOWN LIMITATIONS AND ROADMAP
@@ -517,16 +540,18 @@ N.3 Version 3 (design only): web application (upload, accession fetch, monitorin
 PART O — GUIDANCE FOR AN AI ASSISTANT CONTINUING THIS WORK
 ================================================================================================
   - Read docs/DEVELOPER_GUIDE.md and PIPELINE_METHODS.md; code is the source of truth.
-  - Adding a stage: subclass workflow.Stage (key, title, depends, expensive, settings;
+  - Adding a stage: subclass workflow.Stage (key, title, depends, expensive, settings,
+    result_settings, required_tools(ctx);
     overview/check_inputs/estimate_gb/execute/revalidate), insert into STAGES, add report section
     and tests. execute() must honour ctx.dry_run and return (outputs, params, summary).
   - All external commands via runner.run / run_pipeline; never subprocess with shell=True.
-  - New parameters: add to config/default_config.yaml WITH a comment, validate in config.validate.
+  - New parameters: add to src/rnaseq_pipeline/config/default_config.yaml WITH a comment, validate in
+    config.validate, and list it in the stage's result_settings if it changes results.
   - Menus: adding an entry shifts numbers — update tests/integration/test_end_to_end.py
     (new_project_answers: data input "5" = local FASTQ, organism "5" = custom) and the docs.
   - Never guess biology: groups, strandedness, assembly, trimming are user-confirmed.
   - Keep raw data immutable; write *.partial then rename after validation.
-  - Test before committing: full pytest suite (127 tests) must pass.
+  - Test before committing: pytest tests and ruff check src tests must pass; release: docs/RELEASE.md.
   - Commits: author vipin839; end messages with the Co-Authored-By line used in history; push to
     origin main only when the user asks. Never commit ~/my_rnaseq.yaml or projects/ folders.
   - The user's own projects live in ~/vipin/ (e.g. RNAseq_ritvik1, test11); test on COPIES.

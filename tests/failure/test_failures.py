@@ -65,9 +65,9 @@ def test_interrupted_command_is_terminated(tmp_path):
     threading.Thread(target=interrupt, daemon=True).start()
     t0 = time.time()
     with pytest.raises(KeyboardInterrupt):
-        runner.run(["sleep", "30"], stage="t")
+        runner.run(["sleep", "30.4917"], stage="t")    # a duration no other process on the machine uses
     assert time.time() - t0 < 15
-    assert subprocess.run(["pgrep", "-f", "^sleep 30$"], capture_output=True).returncode != 0
+    assert subprocess.run(["pgrep", "-f", r"^sleep 30\.4917$"], capture_output=True).returncode != 0
 
 
 @pytest.mark.skipif(not have("samtools"), reason="samtools not installed")
@@ -131,7 +131,7 @@ from rnaseq_pipeline import install_signal_handlers, runner, logger, Terminated
 logger.attach_project({logs!r})
 install_signal_handlers()
 try:
-    runner.run_pipeline([["sleep", "300"], ["cat"]], stage="t", stdout_file={out!r})
+    runner.run_pipeline([["sleep", "300.4917"], ["cat"]], stage="t", stdout_file={out!r})
 except Terminated as e:
     print("TERMINATED", e.signame, flush=True)
     sys.exit(143)
@@ -147,14 +147,14 @@ def test_termination_signal_stops_child_processes(tmp_path, signame):
     code = _SIGNAL_CHILD.format(src=str(ROOT / "src"), logs=str(tmp_path / "logs"), out=str(tmp_path / "o.txt"))
     proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
     deadline = time.time() + 10
-    while time.time() < deadline and subprocess.run(["pgrep", "-f", "^sleep 300$"], capture_output=True).returncode:
+    while time.time() < deadline and subprocess.run(["pgrep", "-f", r"^sleep 300\.4917$"], capture_output=True).returncode:
         time.sleep(0.1)
-    assert subprocess.run(["pgrep", "-f", "^sleep 300$"], capture_output=True).returncode == 0, "child never started"
+    assert subprocess.run(["pgrep", "-f", r"^sleep 300\.4917$"], capture_output=True).returncode == 0, "child never started"
     proc.send_signal(getattr(signal, signame))
     out, _ = proc.communicate(timeout=20)
     assert proc.returncode == 143 and f"TERMINATED {signame}" in out
     time.sleep(0.5)
-    assert subprocess.run(["pgrep", "-f", "^sleep 300$"], capture_output=True).returncode != 0, "orphaned child"
+    assert subprocess.run(["pgrep", "-f", r"^sleep 300\.4917$"], capture_output=True).returncode != 0, "orphaned child"
     rec = (tmp_path / "logs" / "commands.jsonl").read_text()
     assert '"interrupted"' in rec
 

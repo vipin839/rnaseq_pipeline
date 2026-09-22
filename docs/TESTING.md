@@ -17,13 +17,13 @@ then `PATH`. R is found from `$RNASEQ_RSCRIPT`, then `~/miniforge3/envs/rnaseq-r
 
 | Suite | Tests | What it establishes |
 |---|---|---|
-| `tests/unit` | 120 | validators, config rules, FASTQ validator, pairing, GEO parsing, count-matrix checks, design validation (replicates, confounding, formulas), checkpoint fingerprints, strandedness calls, reference compatibility, bacterial CDS detection, NCBI package building, store scanning, single-cell detection, featureCounts reconciliation, DESeq2 threshold-set re-derivation, manifest fingerprints, tool/RAM pre-flights, release consistency |
+| `tests/unit` | 122 | validators, config rules, FASTQ validator, pairing, GEO parsing, count-matrix checks, design validation (replicates, confounding, formulas), checkpoint fingerprints, strandedness calls, reference compatibility, bacterial CDS detection, NCBI package building, store scanning, single-cell detection, featureCounts reconciliation, DESeq2 threshold-set re-derivation, manifest fingerprints, tool/RAM pre-flights, R/environment discovery, release consistency |
 | `tests/security` | 8 | credentials never reach project configs, snapshots, logs, terminal or error messages; older projects are cleaned on open |
 | `tests/failure` | 31 | missing tool, pipefail, empty arguments, no shell expansion, timeout, Ctrl-C, **SIGTERM/SIGHUP stop child processes**, validation pool stops at once, corrupted/truncated BAM, insufficient disk, invalid thresholds, R rejects bad designs, downloads (404, unreachable, empty, wrong size, wrong MD5, resume, restart when resume unsupported, never overwrite), pilot streaming retries/truncation, ENA→SRA fallback without mixing mates |
 | `tests/integration` | 35 | the **real interactive CLI** on a synthetic dataset with known truth (16 DE genes): every stage, trimming, strandedness, truth recovery, report/manifest content, no credentials in project, resume without recomputation, dry run, corrupted FASTQ stops the run, a **13-scenario resume-invalidation matrix** (settings changes, corrupted/deleted outputs, edited metadata/results), report tampering detection, `--validate-project` PASS on a finished project and FAIL after a one-read edit, `--check` mini-job (200/200 pairs counted); plus unstranded / forward / single-end libraries and a deliberately wrong strandedness setting |
 | `tests/packaging` | 8 | the built wheel installed into a fresh venv and with pipx, run with an empty HOME and minimal PATH from `~`, `/tmp` and a directory with spaces; package data present; `--check` fails cleanly without tools; the package directory is never written to |
 
-Counts are those of release 1.1.0 (202 tests; 194 run by default, 8 packaging tests need `RNASEQ_PACKAGING_TESTS=1`).
+Counts are those of release 1.1.0 (204 tests; 196 run by default, 8 packaging tests need `RNASEQ_PACKAGING_TESTS=1`).
 
 ## Synthetic truth dataset
 
@@ -41,7 +41,7 @@ Reference result (40,000 pairs per sample, reverse-stranded): **16/16 true DE ge
 | Dataset | What was checked | Result |
 |---|---|---|
 | GSE53720 (yeast, calorie restriction vs normal), pilot 500k reads | strandedness, rRNA diagnosis, DE direction | forward stranded; ~68% alignment explained by rDNA multi-mappers; glucose-repressed genes up (ADH2 +8.9, JEN1 +7.1, FBP1 +5.8 log2FC) |
-| SRP314352 (yeast, low vs high glucose, wild type), pilot 200k reads | download robustness, reconciliation invariants on real reads | see the 1.1.0 entry in `docs/VERIFICATION_MATRIX.md` |
+| SRP314352 (yeast, low vs high glucose, wild type; 2 vs 2), pilot 200k pairs, release 1.1.0 | download robustness, reconciliation invariants on real reads, strandedness, DE direction, `--validate-project` | ENA dropped connections (curl 56): retries recovered 3 runs; SRR14208246 fell back to SRA, its lone ENA mate set aside. All 15 stages passed. Per sample: BAM primary = 2 × input pairs (e.g. 361,104 = 2 × 180,552), alignment 99.2–99.4%, featureCounts total ≥ fragments, matrix column sums = Assigned exactly. Reverse stranded (RSeQC). Glucose-repressed genes up in low glucose: HXT6 +9.3, SUC2 +6.5, CTA1 +5.4, HXT7 +5.0, JEN1 +4.9, HXT2 +4.4, ADH2 +1.9 log2FC (padj < 0.005); FBP1, PCK1 up but not significant. 430 up / 692 down. PROJECT HEALTH: PASS |
 | SRR7361181 (SRA route) | prefetch → vdb-validate → fasterq-dump; a corrupted `.sra` is rejected | pass |
 | E. coli UTI89 (NCBI assembly) | CDS-based annotation, plain index, `--no-spliced-alignment` | 4,954 genes |
 | GSE309855 (third-party reanalysis) | GEO reanalysis links resolved | 94 runs from GSE199596 |

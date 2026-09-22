@@ -56,9 +56,12 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   unstranded and single-end datasets are now generated correctly (the default dataset is byte-identical).
 * Five over-broad `except Exception` handlers narrowed to the errors they are meant to handle.
 * `--check` reported NCBI as unreachable when it answered with an HTTP error status.
+* R was not found in micromamba installations (`$MAMBA_ROOT_PREFIX/envs`), and when several R installations are on
+  PATH the first one was used even if it lacks DESeq2 (the tools environment contains a bare R, required by RSeQC).
+  Now environments under `$MAMBA_ROOT_PREFIX` are found and the R that has DESeq2 is preferred.
 
 ### Tests
-* 202 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 204 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

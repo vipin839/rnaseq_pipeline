@@ -1,6 +1,8 @@
 """Unit tests: path/name/accession validation, config, metadata parsing, count matrix, design, checkpoints,
 strandedness parsing, reference compatibility."""
 
+import os
+
 import pytest
 
 from rnaseq_pipeline import (PipelineError, checkpoint, count_matrix, data_manager, design, geo_manager,
@@ -549,3 +551,39 @@ def test_alignment_ram_estimate_scales_with_index(tmp_path):
     ctx.threads, ctx.mem_gb = 4, 8.0
     need = workflow.AlignmentStage().ram_needed_gb(ctx)
     assert 1.0 < need < 12, need                              # index*1.15 + 0.5 + sort buffers
+
+
+# ---------------------------------------------------------------- R / environment discovery (CI with micromamba)
+def _fake_r_prefix(root, with_deseq2):
+    b = root / "bin"
+    b.mkdir(parents=True)
+    rs = b / "Rscript"
+    rs.write_text("#!/bin/sh\n")
+    rs.chmod(0o755)
+    if with_deseq2:
+        (root / "lib" / "R" / "library" / "DESeq2").mkdir(parents=True)
+    return rs
+
+
+def test_rscript_on_path_prefers_the_r_with_deseq2(tmp_path, monkeypatch):
+    # the tools env carries a bare R (RSeQC dependency) and comes first on PATH
+    from rnaseq_pipeline import environment_manager as EM
+    bare = _fake_r_prefix(tmp_path / "tools", with_deseq2=False)
+    good = _fake_r_prefix(tmp_path / "r", with_deseq2=True)
+    monkeypatch.setenv("PATH", f"{bare.parent}{os.pathsep}{good.parent}")
+    assert EM.rscript_on_path() == good
+    monkeypatch.setenv("PATH", str(bare.parent))
+    assert EM.rscript_on_path() == bare          # no R with DESeq2: report the one that exists (doctor flags it)
+
+
+def test_envs_found_under_mamba_root_prefix(tmp_path, monkeypatch):
+    from rnaseq_pipeline import environment_manager as EM
+    root = tmp_path / "micromamba"
+    for n in ("rnaseq-tools", "rnaseq-r"):
+        (root / "envs" / n / "conda-meta").mkdir(parents=True)
+    rs = _fake_r_prefix(root / "envs" / "rnaseq-r", with_deseq2=True)
+    monkeypatch.setenv("MAMBA_ROOT_PREFIX", str(root))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    envs = EM.Environments({"environment": {"conda_root": str(tmp_path / "no_miniforge")}})
+    assert envs.prefix("tools") == root / "envs" / "rnaseq-tools"
+    assert envs.rscript() == rs

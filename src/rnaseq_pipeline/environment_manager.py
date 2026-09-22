@@ -10,6 +10,23 @@ ENV_FILES = {"tools": PACKAGE_DIR / "envs" / "rnaseq-tools.yml",
              "r": PACKAGE_DIR / "envs" / "rnaseq-r.yml"}
 
 
+def rscript_on_path():
+    """The first Rscript on PATH whose R library has DESeq2, else the first Rscript on PATH.
+
+    Several R installations can be on PATH: the tools environment gets a bare R as a dependency of RSeQC, and it
+    must not be mistaken for the R environment just because it comes first.
+    """
+    found = []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        f = Path(d or ".") / "Rscript"
+        if f.is_file() and os.access(f, os.X_OK) and f not in found:
+            found.append(f)
+    for f in found:
+        if (f.parent.parent / "lib" / "R" / "library" / "DESeq2").is_dir():
+            return f
+    return found[0] if found else None
+
+
 class Environments:
     def __init__(self, cfg):
         env_cfg = cfg.get("environment", {})
@@ -32,6 +49,10 @@ class Environments:
     def prefix(self, key):
         name = self.names[key]
         cands = [self.root / "envs" / name]
+        # micromamba (and setup-micromamba in CI) keeps environments under $MAMBA_ROOT_PREFIX, not beside its binary
+        for var in ("MAMBA_ROOT_PREFIX", "CONDA_ROOT"):
+            if os.environ.get(var):
+                cands.append(Path(os.environ[var]) / "envs" / name)
         exe = self.conda_bin()
         if exe:
             cands.append(exe.resolve().parent.parent / "envs" / name)
@@ -49,8 +70,7 @@ class Environments:
         if b and (b / "Rscript").exists():
             return b / "Rscript"
         if self.path_fallback:
-            w = shutil.which("Rscript")
-            return Path(w) if w else None
+            return rscript_on_path()
         return None
 
     def activate(self):
