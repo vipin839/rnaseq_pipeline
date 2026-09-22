@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 
 from . import PACKAGE_DIR, runner, ui
-from . import config as C
 
 ENV_FILES = {"tools": PACKAGE_DIR / "envs" / "rnaseq-tools.yml",
              "r": PACKAGE_DIR / "envs" / "rnaseq-r.yml"}

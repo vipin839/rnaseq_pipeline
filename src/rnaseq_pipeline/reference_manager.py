@@ -146,7 +146,7 @@ def validate_gtf(path, attribute="gene_id", feature_type="exon"):
             try:
                 s, e = int(start), int(end)
             except ValueError:
-                raise PipelineError(f"GTF line {lineno}: non-integer coordinates", stage="reference")
+                raise PipelineError(f"GTF line {lineno}: non-integer coordinates", stage="reference") from None
             if s < 1 or e < s:
                 raise PipelineError(f"GTF line {lineno}: invalid interval {s}-{e}", stage="reference")
             if strand not in GTF_STRANDS:
@@ -479,7 +479,7 @@ def search_ncbi(query, limit=10, reference_only=True):
     try:
         data = _json.loads(text)
     except ValueError:
-        raise PipelineError(f"unexpected response from NCBI Datasets for {query!r}")
+        raise PipelineError(f"unexpected response from NCBI Datasets for {query!r}") from None
     out = []
     for r in data.get("reports", []):
         info = r.get("assembly_info", {})
@@ -632,7 +632,18 @@ def prepare(ref, cfg, threads, mem_gb, ram_available_gb, log_file, on_feature_ty
             raise PipelineError(f"HISAT2 index invalid after build: {why_idx}", stage="reference")
         ui.ok(f"HISAT2 index built and validated ({why_idx})")
 
+    ui.running("Computing SHA-256 of genome and annotation (once; recorded for reproducibility)")
+    checksums = {}
+    prev = (previous or {}).get("sha256") or {}
+    for label, fpath in (("genome", paths.genome), ("annotation", paths.gtf)):
+        st = Path(fpath).stat()
+        old = prev.get(label) or {}
+        if old.get("size") == st.st_size and old.get("mtime_ns") == st.st_mtime_ns:
+            checksums[label] = old
+        else:
+            checksums[label] = {"sha256": net_sha256(fpath), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
     manifest = {
+        "sha256": checksums,
         "organism": ref.get("organism"), "source": ref.get("source"), "genome_assembly": ref.get("assembly"),
         "annotation_assembly": ref.get("annotation_assembly", ref.get("assembly")),
         "annotation_release": ref.get("annotation_release"), "label": ref.get("label"), "files": record,

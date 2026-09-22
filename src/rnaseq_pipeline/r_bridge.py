@@ -95,11 +95,11 @@ def validate_outputs(project, params):
         need = {"gene_id", "baseMean", "log2FoldChange", "lfcSE", "pvalue", "padj"}
         if full and not need <= set(full[0]):
             problems.append(f"{name}: results lack columns {need - set(full[0])}")
-        for kind, files in (c.get("plots") or {}).items():
+        for files in (c.get("plots") or {}).values():
             for f in (files if isinstance(files, list) else [files]):
                 if not Path(f).exists() or Path(f).stat().st_size == 0:
                     problems.append(f"{name}: plot missing {f}")
-    for kind, files in (summary.get("qc_plots") or {}).items():
+    for files in (summary.get("qc_plots") or {}).values():
         for f in (files if isinstance(files, list) else [files]):
             if not Path(f).exists():
                 problems.append(f"QC plot missing: {f}")

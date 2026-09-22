@@ -5,8 +5,26 @@ import sys
 from datetime import datetime
 
 from . import __version__, dependency_manager, ui
+from .checkpoint import fingerprint
 from .secrets import redacted
 from . import config as C
+
+
+REQUIRED = ("tool_versions", "r_version", "input_files", "reference_checksums", "parameters", "design", "commands")
+
+
+def problems(project):
+    """What a complete manifest must contain; used by the report stage (resume) and --validate-project."""
+    f = project.path("pipeline_manifest", "manifest.json")
+    if not f.exists():
+        return ["manifest.json missing"]
+    try:
+        m = json.loads(f.read_text())
+    except ValueError:
+        return ["manifest.json is not valid JSON"]
+    missing = [k for k in REQUIRED if not m.get(k)]
+    return [f"manifest lacks {', '.join(missing)} (written by an older version or an incomplete run; "
+            "re-running the report step regenerates it)"] if missing else []
 
 
 def write(ctx):
@@ -27,6 +45,20 @@ def write(ctx):
                 checksums[o["path"]] = o["sha256"]
     s = p.state
     first = next(iter(p.samples.values()), {})
+    inputs = {}
+    for sid, rec in p.samples.items():
+        files = {}
+        for mate in ("r1", "r2"):
+            if rec.get(mate) and p.abs(rec[mate]).exists():
+                files[mate] = {"path": rec[mate], "resolved": str(p.abs(rec[mate]).resolve()),
+                               **fingerprint(p.abs(rec[mate]))}
+        if rec.get("provider_md5"):
+            files["provider_md5_verified"] = rec["provider_md5"]
+        inputs[sid] = files
+    ref_manifest = p.path("reference", "reference_manifest.yaml")
+    ref_info = C.load_yaml(ref_manifest) if ref_manifest.exists() else {}
+    cmd_log = p.path("logs", "commands.jsonl")
+    n_cmds = sum(1 for _ in open(cmd_log)) if cmd_log.exists() else 0
     manifest = {
         "project_id": s["project_id"], "project_name": s["name"], "created": s["created"],
         "manifest_date": datetime.now().isoformat(timespec="seconds"), "pipeline_version": __version__,
@@ -39,6 +71,11 @@ def write(ctx):
         "tool_paths": {t["key"]: t["path"] for t in tools},
         "r_packages": {x["package"]: x["version"] for x in r_pkgs},
         "reference": s.get("reference", {}) and {k: v for k, v in s["reference"].items() if k != "package"},
+        "reference_checksums": ref_info.get("sha256"),
+        "reference_download": ref_info.get("files"),
+        "input_files": inputs,
+        "commands": {"log": "logs/commands.jsonl", "count": n_cmds,
+                     "note": "every external command with arguments, exit codes and duration"},
         "data_source": s.get("data_source"), "accessions": s.get("accessions"),
         "samples": {sid: {"status": r.get("status"), "fail_reason": r.get("fail_reason"), "source": r.get("source"),
                           "accession": r.get("accession"), "bio_unit": r.get("bio_unit"), "reads": r.get("reads"),

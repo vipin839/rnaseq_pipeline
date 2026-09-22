@@ -47,7 +47,7 @@ def trim_sample(project, sid, params, threads, log_file):
         after = rep_json["summary"]["after_filtering"]["total_reads"]
         before = rep_json["summary"]["before_filtering"]["total_reads"]
     except (OSError, KeyError, json.JSONDecodeError) as e:
-        raise PipelineError(f"fastp JSON report unreadable: {e}", sample=sid, stage="trimming")
+        raise PipelineError(f"fastp JSON report unreadable: {e}", sample=sid, stage="trimming") from e
     per_file = after // 2 if r2 else after
     os.replace(tmp1, final1)
     if r2:

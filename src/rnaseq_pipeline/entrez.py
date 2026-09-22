@@ -58,7 +58,7 @@ def _json(endpoint, params):
         return json.loads(text)
     except ValueError:
         raise PipelineError(f"unexpected (non-JSON) response from NCBI {endpoint}",
-                            cause=text[:200], remedy="try again in a moment; NCBI may be rate-limiting")
+                            cause=text[:200], remedy="try again in a moment; NCBI may be rate-limiting") from None
 
 
 # ------------------------------------------------------------------ einfo (searchable indexes)

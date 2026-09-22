@@ -10,6 +10,7 @@ Known truth: GENE0001-0008 up 4x in Treat, GENE0009-0016 down 4x, others unchang
 """
 import gzip
 import math
+import os
 import random
 import sys
 from pathlib import Path
@@ -23,7 +24,11 @@ def rc(s):
     return s.translate(COMP)[::-1]
 
 
-def make(out, pairs_per_sample=150000, read_len=75, n_genes=60, seed=7):
+def make(out, pairs_per_sample=150000, read_len=75, n_genes=60, seed=7, strand="reverse", paired=True,
+         adapters=True):
+    """strand: 'reverse' (dUTP-like: read 1 antisense), 'forward' (read 1 sense) or 'unstranded' (random).
+    paired=False writes single-end files <sample>.fastq.gz containing read 1 only."""
+    assert strand in ("reverse", "forward", "unstranded")
     rng = random.Random(seed)
     out = Path(out)
     (out / "fastq").mkdir(parents=True, exist_ok=True)
@@ -40,14 +45,14 @@ def make(out, pairs_per_sample=150000, read_len=75, n_genes=60, seed=7):
         pos = 2000
         while pos < L - 12000 and g < n_genes:
             g += 1
-            strand = "+" if rng.random() < 0.5 else "-"
+            gene_strand = "+" if rng.random() < 0.5 else "-"
             n_ex = rng.randint(1, 4)
             exons, p = [], pos
             for _ in range(n_ex):
                 el = rng.randint(250, 700)
                 exons.append((p, p + el - 1))
                 p += el + rng.randint(300, 1500)
-            genes.append({"id": f"GENE{g:04d}", "chrom": c, "strand": strand, "exons": exons})
+            genes.append({"id": f"GENE{g:04d}", "chrom": c, "strand": gene_strand, "exons": exons})
             pos = p + rng.randint(1500, 4000)
     with open(out / "annotation.gtf", "w") as f:
         f.write("#!genome-build SYNTH1\n")
@@ -91,8 +96,10 @@ def make(out, pairs_per_sample=150000, read_len=75, n_genes=60, seed=7):
             acc += w[gid] / tot
             cum.append(acc)
         by_id = {ge["id"]: ge for ge in genes}
-        with gzip.open(out / "fastq" / f"{name}_R1.fastq.gz", "wt", compresslevel=3) as f1, \
-                gzip.open(out / "fastq" / f"{name}_R2.fastq.gz", "wt", compresslevel=3) as f2:
+        n1 = f"{name}_R1.fastq.gz" if paired else f"{name}.fastq.gz"
+        n2 = f"{name}_R2.fastq.gz" if paired else None
+        with gzip.open(out / "fastq" / n1, "wt", compresslevel=3) as f1, \
+                (gzip.open(out / "fastq" / n2, "wt", compresslevel=3) if paired else open(os.devnull, "w")) as f2:
             for n in range(pairs_per_sample):
                 r = srng.random()
                 lo, hi = 0, len(cum) - 1
@@ -103,13 +110,15 @@ def make(out, pairs_per_sample=150000, read_len=75, n_genes=60, seed=7):
                     else:
                         hi = mid
                 tx = by_id[ids[lo]]["tx"]
-                flen = srng.randint(40, 70) if srng.random() < 0.15 else int(srng.gauss(220, 30))
+                short = adapters and srng.random() < 0.15
+                flen = srng.randint(40, 70) if short else int(srng.gauss(220, 30))
                 flen = max(40, min(flen, len(tx)))
                 start = srng.randint(0, len(tx) - flen)
                 frag = tx[start:start + flen]
-                # dUTP / reverse-stranded: read 1 = antisense, read 2 = sense
-                r1 = (rc(frag) + ADAPTER_R1 + "A" * read_len)[:read_len]
-                r2 = (frag + ADAPTER_R2 + "A" * read_len)[:read_len]
+                antisense_first = strand == "reverse" or (strand == "unstranded" and srng.random() < 0.5)
+                first, second = (rc(frag), frag) if antisense_first else (frag, rc(frag))
+                r1 = (first + ADAPTER_R1 + "A" * read_len)[:read_len]
+                r2 = (second + ADAPTER_R2 + "A" * read_len)[:read_len]
                 r1, q1 = mutate(r1, srng, read_len)
                 r2, q2 = mutate(r2, srng, read_len)
                 rid = f"@SYN{si}:{n + 1}"
@@ -134,5 +143,7 @@ def mutate(seq, rng, L):
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else "synthetic"
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 150000
-    make(out, n)
+    strand = sys.argv[3] if len(sys.argv) > 3 else "reverse"
+    paired = (sys.argv[4] if len(sys.argv) > 4 else "paired") == "paired"
+    make(out, n, strand=strand, paired=paired)
     print(f"done: {out}")

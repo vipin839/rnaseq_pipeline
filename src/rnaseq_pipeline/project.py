@@ -108,7 +108,7 @@ class Project:
             fcntl.flock(self._lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise PipelineError("this project is already open in another pipeline process",
-                                remedy="close the other session first")
+                                remedy="close the other session first") from None
         self._lock_fh.write(str(os.getpid()))
         self._lock_fh.flush()
 

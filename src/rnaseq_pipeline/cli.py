@@ -9,8 +9,8 @@ from pathlib import Path
 
 import yaml
 
-from . import (PipelineError, Terminated, install_signal_handlers, UserAbort, __version__, data_manager, dependency_manager, design,
-               entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
+from . import doctor, project_health
+from . import (PipelineError, Terminated, install_signal_handlers, UserAbort, __version__, data_manager, dependency_manager, entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
 from . import config as C
 from . import validators as V
 from .project import DEFAULT_PROJECTS_DIR, Project
@@ -40,13 +40,13 @@ class App:
                 overrides.append(("--config", V.existing_file(args.config)))
             except ValueError as e:
                 raise PipelineError(f"--config: {e}", remedy="check the path of your personal config file, "
-                                    "e.g. ~/my_rnaseq.yaml")
+                                    "e.g. ~/my_rnaseq.yaml") from e
         for label, path in overrides:
             try:
                 extra = C.load_yaml(path)
             except yaml.YAMLError as e:
                 raise PipelineError(f"{label}: {path} is not valid YAML", cause=str(e)[:300],
-                                    remedy="fix the file (indentation, quotes) and start again")
+                                    remedy="fix the file (indentation, quotes) and start again") from e
             if not isinstance(extra, dict):
                 raise PipelineError(f"{label}: {path} must contain settings like 'ncbi:' / 'threads:'")
             self.cfg = C.deep_merge(self.cfg, extra)
@@ -174,7 +174,7 @@ class App:
             except (PipelineError, ValueError) as e:
                 ui.error(str(e))
                 if not ui.ask_yes_no("Try again?", default=True):
-                    raise UserAbort("data input cancelled")
+                    raise UserAbort("data input cancelled") from e
 
     def _entrez_search(self, p):
         """Interactive NCBI discovery: GEO series or SRA runs, with einfo-driven field menus."""
@@ -813,12 +813,8 @@ class App:
         try:
             ctx = self.context(p)
             ui.info("deep validation: re-hashing all recorded outputs and re-running stage integrity checks")
-            rows = workflow.show_status(ctx, deep=True)
-            bad = [r for r in rows if r[2] == "INVALID"]
-            if bad:
-                ui.warn(f"{len(bad)} stage(s) invalid; 'Resume Existing Project' will re-run them")
-            else:
-                ui.ok("all completed stages validated")
+            overall, rows, pending = project_health.check(p.root)
+            project_health.show(p.root, overall, rows, pending)
             if ctx.cp.exists("fastq_verified") and ui.ask_yes_no(
                     "Also re-read every FASTQ file end-to-end (slow for large data)?", False):
                 cache = p.path("data", "metadata", "fastq_validation_cache.json")
@@ -1044,7 +1040,13 @@ def parse_args(argv):
     ap.add_argument("--config", help="YAML file whose values override the default configuration for new projects")
     ap.add_argument("--auto", action="store_true", help="skip stage screens for inexpensive stages "
                                                         "(decisions and expensive steps still ask)")
-    ap.add_argument("--check", action="store_true", help="run system + dependency checks and exit")
+    ap.add_argument("--check", action="store_true",
+                    help="health check: system, configuration, tools (functional test), R/DESeq2, network; exit")
+    ap.add_argument("--quick", action="store_true", help="with --check: skip the functional and network tests")
+    ap.add_argument("--validate-project", metavar="DIR",
+                    help="re-verify a project (checkpoints, outputs, report, manifest) and print PROJECT HEALTH")
+    ap.add_argument("--runtime-env", choices=["tools", "r"],
+                    help="print the path of the bundled conda environment file (for installing the tools)")
     ap.add_argument("--verbose", "-v", action="store_true", help="show debug output and commands")
     ap.add_argument("--version", action="version", version=f"Pipeline Version: {__version__}")
     return ap.parse_args(argv)
@@ -1062,16 +1064,17 @@ def main(argv=None):
         ui.explain_failure(e)
         return 1
     try:
+        if args.runtime_env:
+            print(environment_manager.ENV_FILES[args.runtime_env])
+            return 0
         if args.check:
-            info = app.sysinfo()
-            system_check.display(info)
-            crit, warns = system_check.assess(info, cfg=app.cfg)
-            for w in warns:
-                ui.warn(w)
-            for c in crit:
-                ui.error(c)
-            ok = app.check_dependencies()
-            return 0 if ok and not crit else 1
+            rep = doctor.run(app.cfg, app.envs, app.projects_dir, app.config_sources, quick=args.quick)
+            doctor.show(rep)
+            return 1 if rep.overall == doctor.FAIL else 0
+        if args.validate_project:
+            overall, rows, pending = project_health.check(V.existing_dir(args.validate_project))
+            project_health.show(args.validate_project, overall, rows, pending)
+            return 1 if overall == project_health.FAIL else 0
         if args.project:
             if args.dry_run:
                 p = Project.open(args.project)

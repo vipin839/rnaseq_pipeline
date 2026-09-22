@@ -1,4 +1,3 @@
-import gzip
 
 from conftest import write_fastq
 from rnaseq_pipeline import fastq_validator as FV

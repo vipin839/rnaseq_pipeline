@@ -79,7 +79,7 @@ def cleanup_candidates(project, checkpoints):
     """Intermediate files that may be removed ONLY because a validated downstream output exists."""
     cands = []
     if checkpoints.exists("alignment_completed") and not checkpoints.verify_files("alignment_completed"):
-        for sid, rec in project.samples.items():
+        for rec in project.samples.values():
             t = rec.get("trimmed")
             if t:
                 for m in ("r1", "r2"):

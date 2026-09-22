@@ -153,6 +153,10 @@ class Stage:
     settings = ()          # shown/editable on the stage screen
     result_settings = ()   # settings whose change makes this stage's existing result stale
 
+    def required_tools(self, ctx):
+        """Executables this stage needs; checked before it starts (see run_stage)."""
+        return ()
+
     def overview(self, ctx):
         return []
 
@@ -174,6 +178,12 @@ class DataStage(Stage):
     settings = ("download.source_preference", "download.max_reads", "import_mode")
     result_settings = ("download.max_reads",)
 
+
+    def required_tools(self, ctx):
+        srcs = {ctx.project.samples[x].get("source") for x in ctx.samples
+                if not ctx.project.samples[x].get("r1")}
+        return (("curl",) if "ena" in srcs else ()) + (
+            ("prefetch", "vdb-validate", "fasterq-dump", "fastq-dump") if srcs & {"sra", "ena"} else ())
     def overview(self, ctx):
         src = ctx.project.state.get("data_source")
         pending = [s for s in ctx.samples if not ctx.project.samples[s].get("r1")]
@@ -236,6 +246,8 @@ class DataStage(Stage):
                     rec["r1"] = p.rel(r1)
                     rec["r2"] = p.rel(r2) if r2 else None
                     rec["pilot_max_reads"] = max_reads or None
+                    if rec["source"] == "ena" and not max_reads:
+                        rec["provider_md5"] = [f[1] for f in (rec.get("download") or {}).get("files", [])]
                     p.save()
                     ui.ok(f"{sid}: downloaded")
             except PipelineError as e:
@@ -289,6 +301,9 @@ class FastqVerifyStage(Stage):
 class RawQCStage(Stage):
     key, title, depends = "raw_qc_completed", "RAW READ QC (FastQC + MultiQC)", ("fastq_verified",)
 
+
+    def required_tools(self, ctx):
+        return ("fastqc", "multiqc")
     def overview(self, ctx):
         return [("Files", sum(2 if ctx.project.fastqs(s, trimmed=False)[1] else 1 for s in ctx.samples)),
                 ("Threads", ctx.threads)]
@@ -379,6 +394,13 @@ class QualityGateStage(Stage):
             decision = "skip"
             ui.info("config trim_adapters=never -> trimming skipped")
         else:
+            ui.explain(
+                "whether to trim adapters and low-quality read ends with fastp",
+                "adapter sequence and low-quality 3' ends stop reads from aligning; trimming removes them, "
+                "while trimming already-clean reads changes little",
+                "if you trim, ALL samples are trimmed the same way (raw files are never modified); skipping "
+                "despite a recommendation usually lowers alignment rates",
+                "the recommendation above comes from the thresholds in config 'quality_gate'")
             c = ui.choose("DECISION", [f"Accept recommendation ({'run fastp' if recommend else 'skip trimming'})",
                                        "Run fastp", "Skip trimming", "Stop pipeline"])
             if c == 3:
@@ -404,6 +426,9 @@ class TrimmingStage(Stage):
     settings = ("fastp_parameters",)
     result_settings = ("fastp_parameters",)
 
+
+    def required_tools(self, ctx):
+        return ("fastp", "fastqc", "multiqc") if (ctx.project.state.get("qc_decision") or {}).get("decision") == "trim" else ()
     def overview(self, ctx):
         d = (ctx.project.state.get("qc_decision") or {}).get("decision")
         fp = ctx.cfg["fastp_parameters"]
@@ -463,6 +488,9 @@ class ReferenceStage(Stage):
     result_settings = ("hisat2_build", "featurecounts_parameters.feature_type",
                        "featurecounts_parameters.attribute")
 
+
+    def required_tools(self, ctx):
+        return ("samtools", "hisat2-build", "hisat2-inspect", "hisat2_extract_splice_sites.py", "hisat2_extract_exons.py", "curl", "gzip")
     def overview(self, ctx):
         r = ctx.project.state.get("reference") or {}
         return [("Reference", r.get("label", "(not selected)")), ("Store", r.get("store")),
@@ -530,6 +558,9 @@ class AlignmentStage(Stage):
     settings = ("hisat2_parameters", "samtools_sort_memory_per_thread", "min_overall_alignment_rate_fail",
                 "min_overall_alignment_rate_warn")
 
+
+    def required_tools(self, ctx):
+        return ("hisat2", "samtools")
     def overview(self, ctx):
         r = ctx.project.state.get("reference") or {}
         trimmed = bool((ctx.project.state.get("qc_decision") or {}).get("decision") == "trim")
@@ -543,9 +574,25 @@ class AlignmentStage(Stage):
     def estimate_gb(self, ctx):
         return storage.estimate(ctx.project, self.key, ctx.samples)
 
+    def ram_needed_gb(self, ctx):
+        """HISAT2 holds the whole index in memory; samtools sort adds its per-thread buffers."""
+        files = reference_manager.index_files(ctx.ref().get("index_prefix", "")) or []
+        index_gb = sum(Path(f).stat().st_size for f in files) / 1e9
+        mem = alignment.sort_memory(ctx.cfg, ctx.threads, ctx.mem_gb)
+        per_thread = int(mem[:-1]) / (1024 if mem.endswith("M") else 1)
+        return round(index_gb * 1.15 + 0.5 + per_thread * max(1, ctx.threads - 1), 1)
+
     def execute(self, ctx):
         p, r = ctx.project, ctx.ref()
         paired = p.is_paired()
+        if not ctx.dry_run:
+            need, avail = self.ram_needed_gb(ctx), ctx.sysinfo["ram_available_gb"]
+            ui.info(f"estimated memory for alignment: {need} GB (available now: {avail} GB)")
+            if need > avail:
+                ui.warn("alignment may run out of memory and be killed by the operating system. Close other "
+                        "programs, lower 'threads', or use a machine with more RAM.")
+                if not ui.ask_yes_no("Start the alignment anyway?", default=False):
+                    raise UserAbort("alignment postponed: not enough free memory")
         rows, failures, outs = [], {}, []
         for sid in ctx.samples:
             final = p.path("alignment", "bam", f"{sid}.sorted.bam")
@@ -622,6 +669,9 @@ class AlignmentStage(Stage):
 class BamQCStage(Stage):
     key, title, depends = "bam_qc_completed", "BAM QC (samtools + MultiQC)", ("alignment_completed",)
 
+
+    def required_tools(self, ctx):
+        return ("samtools", "multiqc")
     def execute(self, ctx):
         p = ctx.project
         out = p.path("alignment", "reports", "samtools")
@@ -668,6 +718,12 @@ class StrandednessStage(Stage):
                                                si["max_undetermined_fraction"])
         if ctx.dry_run:
             return [], {}, {}
+        ui.explain(
+            "the library strandedness used for counting",
+            "featureCounts must know which DNA strand each read represents: a wrong choice discards about half "
+            "(stranded vs unstranded) or nearly all (forward vs reverse) of the correctly assigned reads",
+            "sets featureCounts -s and the StringTie strand flag; recorded with its evidence in the report",
+            "unstranded / forward / reverse (dUTP and TruSeq Stranded kits are 'reverse')")
         ui.section("STRANDEDNESS EVIDENCE (RSeQC infer_experiment)")
         if calls:
             ui.table([(s, f"{e['forward']:.3f}" if e["forward"] is not None else "?",
@@ -723,6 +779,9 @@ class StringTieStage(Stage):
     settings = ("stringtie_parameters",)
     result_settings = ("stringtie_parameters",)
 
+
+    def required_tools(self, ctx):
+        return ("stringtie",) if ctx.cfg["stringtie_parameters"].get("enabled", True) else ()
     def overview(self, ctx):
         return [("Mode", "reference-guided (-e): annotated transcripts only"),
                 ("Strandedness", (ctx.project.state.get("strandedness") or {}).get("value")),
@@ -763,6 +822,9 @@ class FeatureCountsStage(Stage):
     settings = ("featurecounts_parameters",)
     result_settings = ("featurecounts_parameters",)
 
+
+    def required_tools(self, ctx):
+        return ("featureCounts",)
     def overview(self, ctx):
         fc = ctx.cfg["featurecounts_parameters"]
         s = (ctx.project.state.get("strandedness") or {}).get("value")
@@ -834,6 +896,11 @@ class CountMatrixStage(Stage):
         collapsed = False
         extra = []
         if any(len(v) > 1 for v in groups.values()):
+            ui.explain(
+                "whether several sequencing runs of the same library are counted as one sample",
+                "runs/lanes of one library are technical replicates; treating them as separate samples inflates "
+                "the replicate count and makes DESeq2 over-confident (too many false positives)",
+                "summing is the standard handling; the per-run matrix is kept for inspection")
             ui.section("TECHNICAL REPLICATES / LANES DETECTED")
             for u, runs in groups.items():
                 if len(runs) > 1:
@@ -887,6 +954,10 @@ class DesignStage(Stage):
     key, title, depends = "design_confirmed", "EXPERIMENTAL DESIGN / METADATA CONFIRMATION", ("count_matrix_completed",)
     settings = ("design_formula", "reference_level")
 
+    def check_inputs(self, ctx):
+        return [] if ctx.envs.rscript() else ["Rscript not found (the R environment is needed to validate the "
+                                              "design; install it via main menu 4)"]
+
     def execute(self, ctx):
         if ctx.dry_run:
             ui.status("DRY-RUN", "design must be confirmed interactively before DESeq2")
@@ -933,6 +1004,10 @@ class DESeq2Stage(Stage):
         p, cfg = ctx.project, ctx.cfg
         d = design.confirmed_design(p) if not ctx.dry_run else (p.state.get("design") or {})
         s = p.state.get("strandedness") or {}
+        ui.explain(
+            "starting the statistical test (DESeq2) with the design and thresholds below",
+            "these settings define which genes are called up- or downregulated",
+            "changing the design or a threshold later re-runs only DESeq2 and the report")
         ui.section("PYTHON PIPELINE COMPLETE")
         ui.kv([("Count matrix", p.rel(p.path("counts", "gene_count_matrix.tsv"))),
                ("Metadata", d.get("metadata_file")), ("Design", d.get("formula")),
@@ -997,8 +1072,8 @@ class ReportStage(Stage):
         return [rep] + mfiles, {}, {}
 
     def revalidate(self, ctx, data):
-        from . import report_manager
-        return report_manager.validate(ctx)
+        from . import manifest, report_manager
+        return manifest.problems(ctx.project) + report_manager.validate(ctx)
 
 
 STAGES = [DataStage(), FastqVerifyStage(), RawQCStage(), QualityGateStage(), TrimmingStage(), ReferenceStage(),
@@ -1171,6 +1246,12 @@ def run_stage(ctx, idx, stage):
         if s != "VALID" and not ctx.dry_run:
             raise PipelineError(f"upstream stage '{dep}' is {s}" + (f": {why}" if why else ""), stage=stage.key,
                                 remedy="resume the project so earlier stages are completed first")
+    missing = [t for t in stage.required_tools(ctx) if runner.which(t) is None]
+    if missing:
+        raise PipelineError(f"required software not found for this step: {', '.join(missing)}", stage=stage.key,
+                            cause="the scientific tools environment is missing or incomplete",
+                            remedy="run 'rnaseq-pipeline --check' for details, then main menu 4 "
+                                   "(Manage Dependencies) to install them")
     if not ctx.dry_run:
         retry = [s for s, r in ctx.project.samples.items()
                  if r.get("status") == "FAILED" and r.get("failed_stage") == stage.key]

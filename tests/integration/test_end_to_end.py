@@ -7,13 +7,11 @@ Python->R transition, DESeq2, plots, report, manifest, checkpoints and resume.
 Run:  ~/miniforge3/envs/rnaseq-tools/bin/python -m pytest tests/integration -q
 """
 import csv
-import gzip
 import json
 import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -151,6 +149,12 @@ def test_report_manifest_logs(project):
         assert section in html
     m = json.loads((p / "pipeline_manifest" / "manifest.json").read_text())
     assert m["tool_versions"]["hisat2"] and m["r_version"] and m["strandedness"]["value"] == "reverse"
+    # F9: inputs, reference and commands are identifiable from the manifest alone
+    assert len(m["input_files"]) == 6
+    assert all(len(v["r1"]["sha256"]) == 64 and len(v["r2"]["sha256"]) == 64 for v in m["input_files"].values())
+    assert len(m["reference_checksums"]["genome"]["sha256"]) == 64
+    assert len(m["reference_checksums"]["annotation"]["sha256"]) == 64
+    assert m["commands"]["count"] > 20 and m["commands"]["log"] == "logs/commands.jsonl"
     for f in ("environment.yml", "package_versions.txt", "system_information.txt", "R_sessionInfo.txt"):
         assert (p / "pipeline_manifest" / f).exists()
     for f in ("pipeline.log", "command_history.log", "commands.jsonl", "software_versions.tsv"):

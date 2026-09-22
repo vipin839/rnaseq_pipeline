@@ -141,7 +141,6 @@ except Terminated as e:
 @pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
 def test_termination_signal_stops_child_processes(tmp_path, signame):
     """Before the fix, SIGTERM killed the pipeline but left its tools running (they live in their own session)."""
-    import os
     import signal
     import sys
     from conftest import ROOT

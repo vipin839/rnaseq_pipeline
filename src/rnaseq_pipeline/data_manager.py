@@ -275,6 +275,12 @@ def show_public(runs, titles):
 
 
 def register_public(project, runs, source):
+    organisms = sorted({r.get("scientific_name") for r in runs if r.get("scientific_name")})
+    if len(organisms) > 1:
+        raise PipelineError(f"the selected runs come from {len(organisms)} organisms: {', '.join(organisms)}",
+                            cause="one project is aligned to one reference genome; reads from another organism "
+                                  "would mostly fail to align or align to the wrong genes",
+                            remedy="select runs of a single organism (create a separate project for each)")
     layouts = {r.get("library_layout") for r in runs}
     if len(layouts) != 1 or layouts.pop() not in ("PAIRED", "SINGLE"):
         raise PipelineError("runs must all be PAIRED or all SINGLE", remedy="select a consistent subset of runs")

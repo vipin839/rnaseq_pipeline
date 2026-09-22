@@ -129,7 +129,7 @@ def show(table, info_cols=None, info=None):
 def public_fields(info):
     """Metadata fields with >1 distinct value across samples (candidates the user may choose from)."""
     fields = {}
-    for s, meta in info.items():
+    for meta in info.values():
         for k, v in meta.items():
             if isinstance(v, str) and v:
                 fields.setdefault(k, set()).add(v)
@@ -220,11 +220,22 @@ def interactive(project, samples, info, cfg):
     fields = public_fields(info)
     info_cols = [c for c in ("sample_title", "geo_title", "geo_treatment", "geo_source_name") if c in fields][:2]
 
+    first_screen = True
+
     def save_draft():
         project.state["design_draft"] = table
         project.save()
 
     while True:
+        if first_screen:
+            ui.explain(
+                "which biological group each sample belongs to, the baseline group, and what is compared",
+                "DESeq2 tests differences between groups relative to the baseline (reference level); a wrong "
+                "assignment silently reverses or invalidates every result",
+                "nothing is assumed: every value must be set or explicitly confirmed; each group needs at least "
+                "2 biological replicates (3+ recommended)",
+                "assign one by one, by name pattern, from a TSV file, or from a public metadata field you choose")
+            first_screen = False
         ui.header("EXPERIMENTAL DESIGN / SAMPLE METADATA",
                   "Groups are never guessed — please assign or confirm every value")
         show(table, info_cols, info)

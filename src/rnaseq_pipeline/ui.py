@@ -100,7 +100,7 @@ def _input(prompt):
         return input(prompt)
     except EOFError:
         print()
-        raise UserAbort("input closed")
+        raise UserAbort("input closed") from None
 
 
 def ask(prompt, default=None, validator=None, allow_empty=False):
@@ -174,6 +174,14 @@ def choose_many(prompt, items):
             return sorted(idx)
         except ValueError:
             print("  Invalid selection.")
+
+
+def explain(what, why, consequence, options=None):
+    """Context shown before a scientific decision: what is decided, why it matters, what follows."""
+    print()
+    kv([("Decision", what), ("Why it matters", why)] + ([("Options", options)] if options else [])
+       + [("Consequence", consequence)])
+    print()
 
 
 def pause():

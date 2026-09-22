@@ -27,6 +27,24 @@ def sha256(path, limit=None):
     return h.hexdigest()
 
 
+QUICK_BLOCK = 1 << 20
+
+
+def fingerprint(path):
+    """Identity of a file for the manifest: full SHA-256 up to HASH_LIMIT, otherwise a quick fingerprint
+    (SHA-256 of size + first and last MiB) that detects replacement/truncation without reading 100 GB."""
+    p = Path(path)
+    size = p.stat().st_size
+    if size <= HASH_LIMIT:
+        return {"size": size, "sha256": sha256(p)}
+    h = hashlib.sha256(str(size).encode())
+    with open(p, "rb") as f:
+        h.update(f.read(QUICK_BLOCK))
+        f.seek(max(0, size - QUICK_BLOCK))
+        h.update(f.read(QUICK_BLOCK))
+    return {"size": size, "quick_sha256": h.hexdigest(), "note": "size + first/last MiB"}
+
+
 def describe_file(project, path):
     p = Path(path)
     st = p.stat()

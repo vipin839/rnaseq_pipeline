@@ -96,9 +96,9 @@ def assess(per_file, thresholds, paired):
     for sample, mates in per_file.items():
         reasons, status = [], "PASS"
 
-        def flag(level, msg):
+        def flag(level, msg):  # called only within this iteration, so it always sees this sample's list
             nonlocal status
-            reasons.append(f"[{level}] {msg}")
+            reasons.append(f"[{level}] {msg}")  # noqa: B023
             if ORDER[level] > ORDER[status]:
                 status = level
 

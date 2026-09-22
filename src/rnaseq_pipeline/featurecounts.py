@@ -75,7 +75,7 @@ def parse(txt_path, bams):
                 try:
                     x = float(v)
                 except ValueError:
-                    raise PipelineError(f"non-numeric count {v!r} (gene {gid})", stage="featurecounts")
+                    raise PipelineError(f"non-numeric count {v!r} (gene {gid})", stage="featurecounts") from None
                 if x < 0:
                     raise PipelineError(f"negative count for {gid}", stage="featurecounts")
                 counts[b].append(x)

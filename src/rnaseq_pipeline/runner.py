@@ -122,7 +122,7 @@ def run_pipeline(cmds, *, stage, sample=None, log_file=None, stdout_file=None, c
             except FileNotFoundError:
                 raise PipelineError(f"program not found: {c[0]}", stage=stage, sample=sample,
                                     cause="required tool is not installed or not on PATH",
-                                    remedy="use main menu 4 (Manage Dependencies) to install it")
+                                    remedy="use main menu 4 (Manage Dependencies) to install it") from None
             if prev is not None:
                 prev.stdout.close()  # let upstream receive SIGPIPE if downstream exits
             procs.append(p)
@@ -139,7 +139,7 @@ def run_pipeline(cmds, *, stage, sample=None, log_file=None, stdout_file=None, c
     except subprocess.TimeoutExpired:
         status = "timeout"
         _terminate(procs)
-        raise PipelineError(f"command timed out after {timeout}s: {command_str}", stage=stage, sample=sample)
+        raise PipelineError(f"command timed out after {timeout}s: {command_str}", stage=stage, sample=sample) from None
     finally:
         codes = [p.poll() for p in procs]
         duration = round(time.time() - start, 2)

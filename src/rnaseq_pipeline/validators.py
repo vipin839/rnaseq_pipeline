@@ -114,7 +114,7 @@ def positive_int(value, name="value", minimum=1, maximum=None):
     try:
         v = int(str(value).strip())
     except (TypeError, ValueError):
-        raise ValueError(f"{name} must be an integer")
+        raise ValueError(f"{name} must be an integer") from None
     if v < minimum or (maximum is not None and v > maximum):
         rng = f">= {minimum}" + (f" and <= {maximum}" if maximum is not None else "")
         raise ValueError(f"{name} must be {rng}")
@@ -125,7 +125,7 @@ def number(value, name="value", minimum=None, maximum=None, exclusive_min=False,
     try:
         v = float(str(value).strip())
     except (TypeError, ValueError):
-        raise ValueError(f"{name} must be a number")
+        raise ValueError(f"{name} must be a number") from None
     if v != v:  # NaN
         raise ValueError(f"{name} must be a number")
     if minimum is not None and (v < minimum or (exclusive_min and v == minimum)):

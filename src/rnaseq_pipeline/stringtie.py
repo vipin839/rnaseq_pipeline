@@ -6,7 +6,6 @@ samples without a merge step. Output TPM/FPKM are NOT used for DESeq2.
 """
 import os
 import re
-from pathlib import Path
 
 from . import PipelineError, runner
 from .strandedness import STRINGTIE_FLAG

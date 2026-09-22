@@ -1,7 +1,5 @@
 """Unit tests: path/name/accession validation, config, metadata parsing, count matrix, design, checkpoints,
 strandedness parsing, reference compatibility."""
-import json
-from pathlib import Path
 
 import pytest
 
@@ -484,3 +482,70 @@ def test_threshold_sets_detect_wrong_regulation_label():
     up = [r for r in full if r["gene_id"] in ("g_up", "g_edge")]
     down = [r for r in full if r["gene_id"] == "g_down"]
     assert any("'regulation' column" in p for p in r_bridge.check_threshold_sets(full, up, down, up + down, 0.05, 1))
+
+
+# ---------------- F9: file fingerprints for the manifest ----------------
+def test_fingerprint_small_and_large(tmp_path):
+    small = tmp_path / "s.bin"
+    small.write_bytes(b"x" * 1000)
+    fp = checkpoint.fingerprint(small)
+    assert fp["size"] == 1000 and len(fp["sha256"]) == 64
+    big = tmp_path / "b.bin"
+    with open(big, "wb") as f:
+        f.truncate(checkpoint.HASH_LIMIT + 5 * 1024 * 1024)
+    a = checkpoint.fingerprint(big)
+    assert "quick_sha256" in a and "sha256" not in a
+    with open(big, "r+b") as f:  # change the last byte: quick fingerprint must change
+        f.seek(-1, 2)
+        f.write(b"1")
+    assert checkpoint.fingerprint(big)["quick_sha256"] != a["quick_sha256"]
+
+
+# ---------------- F11 / F14 / F10 ----------------
+def test_mixed_organisms_refused(tmp_path):
+    p = Project.create("orgs", tmp_path)
+    runs = [{"run_accession": "SRR0000001", "library_layout": "PAIRED", "scientific_name": "Homo sapiens"},
+            {"run_accession": "SRR0000002", "library_layout": "PAIRED", "scientific_name": "Mus musculus"}]
+    with pytest.raises(PipelineError, match="2 organisms"):
+        data_manager.register_public(p, runs, "ena")
+    assert p.samples == {}
+
+
+def _ctx(tmp_path):
+    from rnaseq_pipeline import environment_manager as EM, system_check as SC, workflow
+    p = Project.create("ctx", tmp_path)
+    cfg = p.config()
+    return workflow.Context(p, cfg, EM.Environments(cfg), SC.collect(p.root))
+
+
+def test_missing_tool_reported_before_stage_starts(tmp_path):
+    from rnaseq_pipeline import workflow
+    ran = []
+
+    class Needy(workflow.Stage):
+        key, title = "needy", "NEEDY"
+
+        def required_tools(self, ctx):
+            return ("definitely-not-installed-tool-xyz",)
+
+        def execute(self, ctx):
+            ran.append(True)
+            return [], {}, {}
+
+    with pytest.raises(PipelineError, match="required software not found.*definitely-not-installed-tool-xyz"):
+        workflow.run_stage(_ctx(tmp_path), 1, Needy())
+    assert not ran, "the stage must not start when a tool is missing"
+
+
+def test_alignment_ram_estimate_scales_with_index(tmp_path):
+    from rnaseq_pipeline import workflow
+    ctx = _ctx(tmp_path)
+    idx = tmp_path / "idx"
+    idx.mkdir()
+    for i in range(1, 9):
+        with open(idx / f"genome.{i}.ht2", "wb") as f:
+            f.truncate(500_000_000 if i == 1 else 10)          # ~0.5 GB index
+    ctx.project.state["reference"] = {"index_prefix": str(idx / "genome")}
+    ctx.threads, ctx.mem_gb = 4, 8.0
+    need = workflow.AlignmentStage().ram_needed_gb(ctx)
+    assert 1.0 < need < 12, need                              # index*1.15 + 0.5 + sort buffers
