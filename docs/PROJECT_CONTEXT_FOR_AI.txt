@@ -1,0 +1,552 @@
+================================================================================================
+BULK RNA-seq ANALYSIS PIPELINE — COMPLETE PROJECT CONTEXT (for humans and AI assistants)
+================================================================================================
+Repository : https://github.com/vipin839/rnaseq_pipeline   (branch: main)
+Local path : ~/rnaseq_pipeline   (Ubuntu 24.04 under WSL2 on the author's laptop)
+Version    : 1.0.0 line (VERSION file), with follow-up fixes up to commit 08a9c11 (2026-09-22)
+Languages  : Python 3.10+ (pre-processing, orchestration)  +  R 4.x (DESeq2 and downstream)
+Size       : ~8,000 lines (Python package ~7,600, R ~450), 127 automated tests
+Document   : docs/PROJECT_CONTEXT_FOR_AI.txt — one self-contained description of the project:
+             purpose, theory, architecture, workflow, usage, validation, history, limits, roadmap.
+
+HOW TO READ THIS FILE
+  Part A  Purpose and scope ............................ what the tool is for, what it is not
+  Part B  Scientific background (theory) ............... why every step exists
+  Part C  Architecture .................................. how the code is organised
+  Part D  The workflow, stage by stage .................. what runs, what is checked
+  Part E  Data sources .................................. SRA / GEO / ENA / local / NCBI search
+  Part F  Reference genomes ............................. catalog, NCBI, custom, store, bacteria
+  Part G  Configuration ................................. settings and how to override them
+  Part H  Using the tool (practical) .................... commands, menus, a full session
+  Part I  Outputs, logs, report, reproducibility
+  Part J  Safeguards, error handling, resume, recovery
+  Part K  Testing and validation evidence
+  Part L  Installation and environment
+  Part M  History (what was built and fixed, in order)
+  Part N  Known limitations and roadmap (V1 remaining, V2, V3)
+  Part O  Guidance for an AI assistant continuing this work
+  Part P  Glossary
+
+================================================================================================
+PART A — PURPOSE AND SCOPE
+================================================================================================
+A.1 One-sentence summary
+  An interactive, terminal-based, fully validated and resumable pipeline that takes BULK RNA-seq
+  reads (from public databases or local FASTQ files) all the way to differential-expression
+  results (up/down-regulated genes), plots and a final HTML report.
+
+A.2 Who it is for
+  A biologist or student with basic Linux knowledge. The user never edits scripts: every step is
+  a numbered menu with explanations. Advanced users can change every scientific parameter in a
+  YAML configuration.
+
+A.3 Design goals (from the original "master development prompt")
+  - One launcher (./rnaseq_pipeline); modular code behind it.
+  - Python does everything up to the gene count matrix; R does DESeq2 and everything after.
+  - Strong validation at every stage: never report success just because a file exists.
+  - Checkpoint + resume: an interrupted or crashed run continues without recomputing valid work.
+  - Reproducibility: exact commands, versions, parameters, checksums are recorded.
+  - Never silently guess anything scientific (experimental groups, strandedness, assembly,
+    reference release, trimming) — the user confirms every decision.
+  - Never overwrite raw data; never use sudo; never install or download large data without
+    showing size and asking.
+  - Handle large data (tens to hundreds of GB) by streaming and avoiding copies.
+
+A.4 In scope for Version 1
+  Bulk RNA-seq only: public (SRA/GEO/ENA) or local FASTQ input, NCBI dataset search, reference
+  management (any organism), FASTQ validation, FastQC/MultiQC, quality gate, conditional fastp
+  trimming, HISAT2 alignment, sorted/indexed BAM + QC, strandedness inference, StringTie2
+  transcript quantification, featureCounts gene counting, validated count matrix, interactive
+  experimental design, DESeq2, up/down gene tables, standard plots, optional GO/Reactome,
+  HTML report, manifest.
+
+A.5 Explicitly out of scope for Version 1
+  - Web interface, cloud execution, schedulers (SLURM), multi-user, distributed computing.
+  - Single-cell RNA-seq (10x Genomics, Drop-seq, Smart-seq, ...). The tool DETECTS and REFUSES
+    it, because bulk methods give wrong results on barcoded/UMI single-cell reads.
+  - Pseudo-aligners (Salmon/kallisto), STAR, interaction/time-course designs (planned later).
+
+================================================================================================
+PART B — SCIENTIFIC BACKGROUND (THEORY)
+================================================================================================
+B.1 What bulk RNA-seq measures
+  RNA is extracted from a tissue/culture (millions of cells pooled), converted to cDNA,
+  fragmented, adapter-ligated and sequenced. Each sequenced fragment ("read", or a read pair for
+  paired-end) is a random sample of an expressed transcript. The number of reads falling on a gene
+  is proportional to (expression level × gene length × sequencing depth). Comparing counts between
+  conditions, after normalising for depth, reveals differentially expressed (DE) genes.
+
+B.2 FASTQ files
+  4 lines per read: "@id", sequence, "+", quality string (one Phred score per base, ASCII+33).
+  Phred Q = -10·log10(P_error): Q20 = 1% error, Q30 = 0.1%. Paired-end data = two files (R1, R2)
+  whose records must be in the same order with matching IDs.
+
+B.3 Quality control and trimming
+  FastQC reports per-base quality, adapter content, overrepresented sequences, duplication, GC,
+  N content. Adapters appear when the insert is shorter than the read length ("read-through");
+  they prevent alignment and must be trimmed. Low-quality 3' tails can also be trimmed. Note:
+  duplication and uneven base composition are NORMAL in RNA-seq (highly expressed genes, random
+  hexamer bias) and are not by themselves reasons to discard data.
+
+B.4 Reference genome and annotation
+  Genome FASTA (chromosome sequences) + annotation GTF (where genes/transcripts/exons are). They
+  MUST come from the same assembly (e.g. GRCh38) — mixing assemblies (GRCh37 annotation on a
+  GRCh38 genome) silently assigns reads to wrong genes. Providers name chromosomes differently
+  ("chr1" UCSC/GENCODE vs "1" Ensembl vs "NC_000001.11" RefSeq).
+  Bacterial NCBI annotations describe genes as CDS features (few or no "exon" records) — counting
+  must then use CDS.
+
+B.5 Splice-aware alignment (HISAT2)
+  Eukaryotic mRNA is spliced, so reads can span exon–exon junctions; HISAT2 aligns across
+  introns. Known splice sites (from the GTF) improve sensitivity. They can be built into the
+  index (needs ~60 bytes/bp of RAM: ~160–200 GB for human) or supplied at alignment time
+  (--known-splicesite-infile), which is standard with small sensitivity loss. Bacteria have no
+  introns: --no-spliced-alignment is used. Output: SAM → sorted, indexed BAM.
+
+B.6 Library strandedness
+  Stranded protocols keep which DNA strand the RNA came from. dUTP/TruSeq Stranded = "reverse"
+  (read 1 is antisense), some ligation kits = "forward", older kits = "unstranded". Counting with
+  the wrong setting loses ~half or nearly all reads, or mis-assigns antisense reads. It is
+  inferred from data (RSeQC infer_experiment) and confirmed by the user; never assumed.
+
+B.7 Quantification: gene counts vs TPM
+  - featureCounts: integer read/fragment counts per gene → REQUIRED input for DESeq2, whose model
+    needs raw counts.
+  - StringTie2 (-e, reference-guided): transcript-level abundance as TPM/FPKM — useful for
+    isoform-level views, but NOT used for DESeq2 (TPM is already normalised and not counts).
+  Multi-mapping reads (e.g. rRNA repeats) are not counted by default.
+
+B.8 Technical vs biological replicates
+  Several sequencing runs of the same library (lanes) are technical replicates → their counts are
+  SUMMED into one sample. Biological replicates (independent animals/cultures) are what DESeq2
+  needs to estimate variability: at least 2 per group (3+ recommended).
+
+B.9 DESeq2 statistics
+  - Model: counts ~ Negative Binomial(mean = size_factor × normalised expression, dispersion).
+  - Size factors (median-of-ratios) correct for sequencing depth/composition.
+  - Dispersion estimated per gene and shrunk towards a trend (information sharing across genes).
+  - A GLM with the design formula (e.g. ~ condition or ~ batch + condition) is fitted; the Wald
+    test gives a p-value per gene for the contrast (e.g. Treatment vs Control).
+  - Benjamini–Hochberg adjustment → padj (false-discovery rate).
+  - log2 fold change (log2FC): +1 = 2× higher in the numerator group, -1 = 2× lower.
+  - LFC shrinkage (apeglm) stabilises noisy fold changes of low-count genes; used for plots and
+    ranking, while significance uses the standard (unshrunken) estimate.
+  - Independent filtering and Cook's-distance outlier handling are DESeq2 defaults.
+  - Pre-filter used here: keep genes with ≥10 reads in ≥ (size of the smallest group) samples.
+  Definitions used (configurable):
+     Upregulated   = padj < alpha AND log2FC ≥  t     (defaults alpha 0.05, t 1)
+     Downregulated = padj < alpha AND log2FC ≤ -t
+  Design validity: every group needs replicates; covariates must not be confounded with the
+  variable of interest (if every batch contains only one condition, batch and condition cannot
+  be separated — the design matrix is not full rank).
+
+B.10 Exploratory statistics
+  VST (variance-stabilising transformation; rlog alternative) makes counts comparable for PCA,
+  sample-distance and correlation heatmaps (blind = TRUE for QC). PCA on the 500 most variable
+  genes shows whether samples cluster by condition (good) or by batch (a problem).
+
+B.11 Bulk vs single-cell (why single-cell is refused)
+  10x Genomics single-cell libraries store per read-spot: an index read (8 bp), a cell-barcode +
+  UMI read (28 bp) and the cDNA read (~90 bp). Correct analysis demultiplexes cells by barcode and
+  collapses PCR duplicates by UMI (Cell Ranger, STARsolo, alevin-fry). Treating such data as bulk
+  paired-end reads is wrong, so the pipeline detects single-cell metadata (ENA library_source
+  "TRANSCRIPTOMIC SINGLE CELL", protocol words like Chromium/10x/Drop-seq) and stops.
+
+================================================================================================
+PART C — ARCHITECTURE
+================================================================================================
+C.1 Repository layout
+  rnaseq_pipeline               bash launcher (sets PYTHONNOUSERSITE=1, execs rnaseq_pipeline.py)
+  rnaseq_pipeline.py            entry: checks Python ≥3.10 + PyYAML (falls back to the conda env
+                                Python if PyYAML missing), then rnaseq.cli.main()
+  VERSION, CHANGELOG.md, README.md, .gitignore, .gitattributes (LF line endings)
+  config/default_config.yaml    every parameter with comments (see Part G)
+  config/reference_catalog.yaml reference packages (URLs, checksums, sizes)
+  envs/rnaseq-tools.yml         conda env: FastQC, MultiQC, fastp, HISAT2, samtools, StringTie,
+                                Subread (featureCounts), SRA Toolkit, RSeQC, pigz, pytest
+  envs/rnaseq-r.yml             conda env: R, DESeq2, EnhancedVolcano, apeglm, ggplot2, pheatmap,
+                                ggrepel, RColorBrewer, data.table, dplyr, tibble, readr, jsonlite
+  python/rnaseq/                the Python package (below)
+  R/                            deseq2_pipeline.R (entry), qc_plots.R, differential_expression.R,
+                                visualization.R, downstream_analysis.R
+  docs/                         INSTALLATION, USER_GUIDE, PIPELINE_METHODS, TROUBLESHOOTING,
+                                DEVELOPER_GUIDE, this file
+  tests/                        unit/, failure/, integration/, data/make_synthetic.py
+
+C.2 Python modules (python/rnaseq/) and responsibilities
+  cli.py                 menus, new-project wizard, data/reference selection, resume/validate,
+                         dependency & reference management, configuration editor, argparse
+  workflow.py            the state machine: 15 Stage classes, stage screens, checkpoints,
+                         resume logic, cascade invalidation, sample-failure handling
+  ui.py                  all terminal output ([OK]/[ERROR]/...) and prompts
+  logger.py              per-project logs: pipeline.log, pipeline_errors.log, command_history
+  runner.py              the ONLY way external commands run: argument lists (never shell=True),
+                         pipelines with every exit code checked (pipefail), per-step logs,
+                         Ctrl-C kills the process group, dry-run printing
+  config.py              load/merge/validate/snapshot YAML config
+  project.py             project folder layout, project.json state, file lock
+  checkpoint.py          checkpoint write/verify; content fingerprints
+  validators.py          names, paths, accessions, numbers, design formulas
+  system_check.py        OS, CPU, RAM, disk, filesystem type (FAT32/9p warnings), temp space
+  environment_manager.py conda env discovery/creation/export
+  dependency_manager.py  tool + R package detection, versions, install plans (asks first)
+  data_manager.py        local FASTQ pairing/import, public metadata resolution, single-cell check
+  entrez.py              NCBI E-utilities client (einfo/esearch/esummary/efetch/elink), rate limit
+  ena_manager.py         ENA Portal API metadata + MD5-verified FASTQ download, pilot streaming
+  sra_manager.py         prefetch → vdb-validate → fasterq-dump → pigz; NCBI runinfo
+  geo_manager.py         GEO series parsing; follows reanalysis and SuperSeries links
+  net.py                 HTTP text requests with retries; resumable verified downloads (curl)
+  fastq_validator.py     streaming FASTQ validation, pairs in lockstep, multiprocess
+  qc_manager.py          FastQC/MultiQC execution and validation
+  quality_assessment.py  parses FastQC data → PASS/REVIEW/TRIMMING RECOMMENDED/FAIL
+  trimming.py            fastp command + validation of its outputs
+  reference_manager.py   catalog, NCBI assembly search, downloads + checksums, FASTA/GTF
+                         validation, compatibility, feature-type detection, HISAT2 index,
+                         prepare() (used by the stage AND the standalone menu), scan_store()
+  alignment.py           hisat2 | samtools sort pipeline, index
+  bam_manager.py         BAM integrity validation, samtools QC
+  strandedness.py        RSeQC parsing and calling; flag mapping
+  stringtie.py           StringTie2 runs, validation, merged TPM matrices
+  featurecounts.py       featureCounts command, strict output parsing
+  count_matrix.py        clean matrix building, technical-replicate collapsing, validation
+  design.py              metadata editing, design validation (rank check), confirmation
+  r_bridge.py            writes params JSON, runs Rscript, validates R outputs
+  storage.py             disk estimates, pre-flight checks, safe cleanup candidates
+  manifest.py            reproducibility manifest
+  report_manager.py      final HTML report
+
+C.3 Core engineering principles
+  - Modules other than cli.py/workflow.py/design.py never prompt the user → reusable by a future
+    API/web backend.
+  - Outputs are written to *.partial / *.part / index.building and renamed only after validation.
+  - A checkpoint is written only after post-validation. Checkpoint = outputs (SHA-256 for files
+    ≤50 MB, size+mtime for larger ones re-checked by stage validators), params, and the
+    fingerprints of upstream checkpoints. Fingerprints are CONTENT-based (not timestamps), so
+    re-running a stage with identical results does not invalidate later stages. A stage is VALID
+    only if all upstream stages are VALID (recursive cascade).
+  - Raw data immutable (local FASTQ are symlinked by default, never written to).
+  - One process per project (fcntl lock).
+
+C.4 Python → R hand-over
+  After the design is confirmed, Python writes results/deseq2/deseq2_params.json (paths, formula,
+  variables, reference level, contrasts, thresholds, filter, plot options) and runs
+  Rscript --vanilla R/deseq2_pipeline.R params.json (first with --validate-only at design
+  confirmation). R prints [OK]/[ERROR] lines that Python relays; afterwards Python independently
+  validates every R output (row counts, thresholds actually respected, plots exist).
+
+================================================================================================
+PART D — THE WORKFLOW, STAGE BY STAGE
+================================================================================================
+Each stage: START → input validation → execution → post-validation → checkpoint (SUCCESS) or
+explained FAILURE. Checkpoint files are named after the key in brackets (checkpoints/<key>.json).
+"project_initialized" is written at project creation.
+
+ 1. DATA DOWNLOAD / IMPORT [data_acquired]
+    ENA: HTTPS, resumable, MD5 verified. SRA: prefetch, vdb-validate, fasterq-dump --split-3.
+    ENA without mirrored files / wrong file count for the layout → automatic SRA route.
+    Pilot mode streams only the first N reads (test only; flagged everywhere).
+    Refuses single-cell samples and runs with more than two reads per spot.
+ 2. FASTQ VERIFICATION [fastq_verified]
+    Every record streamed: '@' header, '+' line, alphabet ACGTNacgtn., quality chars, equal
+    lengths, complete records, gzip integrity (decompressor exit code), pairs read in lockstep
+    (equal counts, matching mate IDs), Phred+64 warning. Cache avoids re-reading unchanged files.
+ 3. RAW READ QC [raw_qc_completed]
+    FastQC (report must parse; its Total Sequences must equal step-2 read count) + MultiQC.
+ 4. QUALITY GATE [quality_assessed]  — DECISION
+    Advisory statuses from configurable thresholds (Part G). User: accept recommendation / run
+    fastp / skip / stop. If trimming is chosen, ALL samples are trimmed (uniform processing).
+ 5. CONDITIONAL TRIMMING + POST-TRIM QC [trimming_completed]
+    fastp; trimmed files fully re-validated; read counts must equal fastp JSON; FastQC/MultiQC and
+    assessment repeated. Invalid trimmed output stops the pipeline. Skipped if not chosen.
+ 6. REFERENCE PREPARATION [reference_ready]
+    Download/link, checksum, FASTA+GTF validation, feature-type check (bacteria → CDS prompt),
+    genome/annotation compatibility, samtools faidx, BED12, splice sites/exons, HISAT2 index
+    (RAM-aware; plain index for intron-free genomes), index validation (hisat2-inspect names ==
+    FASTA names). Existing valid index never rebuilt.
+ 7. ALIGNMENT [alignment_completed]
+    hisat2 --dta [--known-splicesite-infile | --no-spliced-alignment] | samtools sort; quickcheck;
+    index. Validation: sorted header, index, flagstat, PRIMARY RECORDS == INPUT READS (×2 PE),
+    HISAT2 total == FASTQ count, alignment rate ≥20% (warning <70%). Failed BAM → *.FAILED.bam.
+ 8. BAM QC [bam_qc_completed]   samtools idxstats/flagstat/stats + MultiQC.
+ 9. STRANDEDNESS [strandedness_determined] — DECISION
+    RSeQC infer_experiment on 200k reads/sample; ≥80% one orientation → stranded; balanced →
+    unstranded; else undetermined → user must choose. Stored with source and confidence.
+10. STRINGTIE2 [stringtie_completed]  -e reference-guided TPM (can be disabled, e.g. bacteria).
+11. featureCounts [featurecounts_completed]
+    -t exon|CDS -g gene_id -s 0/1/2, PE: -p --countReadPairs -B -C. Validated strictly; gene
+    count must equal the GTF gene count; warning if <30% assigned.
+12. COUNT MATRIX [count_matrix_completed] — DECISION (sum technical replicates?)
+13. EXPERIMENTAL DESIGN [design_confirmed] — DECISION
+    Assign conditions (one by one, by text pattern, from TSV, or by choosing a public metadata
+    field), covariates, formula, reference level, contrasts. Validated (replicates, valid R
+    names, full rank) in Python and in R. Stored with the metadata SHA-256 (edits after
+    confirmation are detected).
+14. DESeq2 [deseq2_completed] — DECISION ("Proceed to DESeq2?" after a transition record)
+15. REPORT + MANIFEST [report_generated]
+
+Samples that fail a step: listed with reasons; the user may continue without them (≥2 remain)
+or stop. Re-running a step retries the samples that failed in it.
+
+================================================================================================
+PART E — DATA SOURCES
+================================================================================================
+Data-input menu:
+  1 Search NCBI for a dataset   GEO series or SRA runs by keywords + fields. Field menus come from
+                                NCBI einfo ("Show searchable fields (indexes)" lists them for gds,
+                                sra, bioproject, biosample, assembly, taxonomy). Paged results.
+  2 NCBI SRA accession(s)       SRR/SRX/SRP/PRJNA...; downloaded with the SRA toolkit.
+  3 NCBI GEO accession          GSE...; samples → linked SRX → runs. "Third-party reanalysis"
+                                series (no own samples) are resolved to the original samples;
+                                SuperSeries collect their sub-series.
+  4 ENA accession(s)            any run/experiment/study; direct FASTQ + MD5.
+  5 Local FASTQ files           pairing from _R1/_R2, _1/_2, Illumina _R1_001; lanes → bio unit.
+  6 Existing project data       FASTQ already in <project>/data/fastq.
+After selection: metadata table (organism, layout, instrument, reads, size, description) with
+warnings (mixed organisms/layouts, non-RNA-Seq, multiple runs per sample, SINGLE-CELL). Then
+Full data or Pilot subset (N reads per run, N ≥ 1000). Downloads happen in stage 1.
+NCBI etiquette: email + optional API key in config (3 → 10 requests/second).
+
+================================================================================================
+PART F — REFERENCE GENOMES
+================================================================================================
+F.1 Catalog (config/reference_catalog.yaml; all URLs verified):
+  human: GENCODE 46 (GRCh38), Ensembl 112, UCSC hg38 ncbiRefSeq, NCBI RefSeq GRCh38.p14
+  mouse: GENCODE M35 (GRCm39), Ensembl 112, UCSC mm39 ncbiRefSeq
+  yeast: Ensembl 112 (R64-1-1) — tiny, good for tests
+  Checksums: GENCODE/UCSC/NCBI MD5 lists; Ensembl BSD `sum` (CHECKSUMS files).
+F.2 Organism menu: 1 human, 2 mouse, 3 yeast, 4 Search NCBI for ANY organism, 5 Custom.
+  NCBI search uses the Datasets API (by name, strain or taxid); results show accession, assembly,
+  level, size, annotation; the GTF existence is checked; files come from the NCBI FTP (MD5).
+F.3 Reference source menu (catalog organisms): 1 GENCODE, 2 Ensembl, 3 RefSeq, 4 UCSC,
+  5 Custom local FASTA+GTF, 6 Existing reference/index, 7 Search NCBI for this organism.
+F.4 Shared store (reference_store, default ~/rnaseq_references): one copy per reference, symlinked
+  into projects. "Existing reference/index" lists prepared references as [ready] and any folder
+  holding a FASTA + GTF pair as [needs index]; can scan another folder; asks which file if a
+  folder holds several; index prefix optional.
+F.5 Main menu 5 "Manage Reference Databases": catalog + store listing; Download and prepare a
+  reference NOW (no project needed); change a project's reference; delete a prepared reference
+  (type the folder name to confirm).
+F.6 Compatibility checks: shared chromosome names (chr-prefix diagnosis), annotation coordinates
+  within chromosome lengths (catches assembly mismatch), declared assemblies equal, GTF header
+  build matches; override only by typing OVERRIDE (recorded).
+F.7 Bacteria: annotation with few exons but many CDS → prompt to count CDS; StringTie2 disabled;
+  plain HISAT2 index (empty splice-site file would crash hisat2-build); --no-spliced-alignment;
+  BED12 for RSeQC built from CDS.
+F.8 RAM rule for the HISAT2 index: splice sites in index only if ~60 bytes/bp fits in 90% of
+  available RAM; otherwise plain index (~2.8 bytes/bp; human ≈ 8 GB) + sites at alignment.
+
+================================================================================================
+PART G — CONFIGURATION
+================================================================================================
+config/default_config.yaml (shipped defaults; do not edit for personal settings). A project gets
+config/project_config.yaml (editable via main menu 7 or stage "Change settings"; every value is
+validated). Each run saves config/config_used_<timestamp>.yaml. Personal overrides:
+  ./rnaseq_pipeline --config ~/my_rnaseq.yaml     (e.g. ncbi.email, ncbi.api_key, reference_store)
+Key settings (default):
+  threads auto (cores-1) · max_memory_gb auto (80% RAM) · environment.conda_root ~/miniforge3
+  ncbi.email "" · ncbi.api_key "" · read_type auto · import_mode symlink
+  download.source_preference ena · download.max_reads 0 (or ≥1000 pilot) · download.retries 3
+  quality_gate: adapter trim >5% / review >1%; tail mean quality trim <Q20 / review <Q28;
+    lower quartile <Q10 review; overrepresented >1% review; N >5% review; duplication >80% review;
+    GC deviation >10 review; reads <1,000,000 review
+  trim_adapters ask · fastp: detect_adapter_for_pe, Q20, 40% unqualified limit, cut_right w4/Q20,
+    min length 25
+  reference_store ~/rnaseq_references · hisat2_build.use_splice_sites_in_index auto
+  hisat2: dta true, use_known_splice_sites true · alignment rate warn 70 / fail 20
+  strandedness auto (inference: stranded ≥0.80, unstranded diff ≤0.10, undetermined >0.50)
+  stringtie_parameters.enabled true, reference_guided_only true
+  featurecounts: feature_type exon (CDS for bacteria), attribute gene_id, no multimappers,
+    MAPQ 0, both ends mapped, exclude chimeric
+  design_formula "~ condition" · alpha 0.05 · log2fc_threshold 1 · lfc_test_threshold 0
+  min_count_filter 10 reads in smallest_group samples · independent_filtering, cooks_cutoff true
+  lfc_shrinkage apeglm · transformation vst · top_n_genes 50 · heatmap_max_genes 500
+  plot_formats png+pdf, 300 dpi · annotation.enabled false (GO/Reactome optional)
+  storage: warn <50 GB free, ask if free < 1.5× estimate, cleanup ask
+
+================================================================================================
+PART H — USING THE TOOL (PRACTICAL)
+================================================================================================
+H.1 Start
+  cd ~/rnaseq_pipeline && ./rnaseq_pipeline --config ~/my_rnaseq.yaml
+  (If "Permission denied": bash rnaseq_pipeline  — happens when cloned onto a Windows/NTFS drive.)
+  Flags: --project DIR · --dry-run · --auto · --config FILE · --projects-dir DIR · --verbose ·
+         --check · --version
+H.2 Main menu
+  1 Start New RNA-seq Project · 2 Resume Existing Project · 3 Validate Existing Project ·
+  4 Manage Dependencies / Environment · 5 Manage Reference Databases · 6 View Previous Reports ·
+  7 Pipeline Configuration · 8 Exit
+H.3 Project menu (resume)
+  1 Continue pipeline (asks for missing data/reference first; offers retry/replace if all samples
+    failed or are single-cell) · 2 Re-run a specific stage · 3 Select samples · 4 Samples status /
+    re-include · 5 Choose or replace the data source · 6 Change reference · 7 Experimental design ·
+  8 Clean up intermediate files · 9 Dry run · 10 Return to main menu
+H.4 Stage screen (every step)
+  1 Start · 2 Review settings · 3 Change settings · 4 Validate inputs again ·
+  5 Return to the project menu · 6 Cancel. If the step cannot start, pressing Start explains why
+  and returns to the project menu (no loops).
+H.5 Example session (bulk yeast, low vs high glucose, 2 vs 2, ENA SRR14208246-49)
+  1 → name → Enter → Data input 4 → "SRR14208246 SRR14208247 SRR14208248 SRR14208249" → all →
+  1 (full) or 2 (pilot) → Organism 3 (yeast) → source 2 (Ensembl) → 1 → y → n (no GO) → 1 (all
+  samples) → y (start) → press 1 on each step screen → quality gate: 1 (accept) → strandedness:
+  Enter (confirm) → design: 2 "High-glucose"→High, 2 "Low-glucose"→Low, 7 baseline High, y, 8, y →
+  DESeq2: y → report. Expected biology: glucose-repressed genes (ADH2, FBP1, PCK1, JEN1, SUC2) up
+  in low glucose.
+H.6 Timings (12 cores): download dominates (25 Mbps ≈ 11 GB/h); human index 1–2 h once;
+  alignment ~20–40 min per 40M-read human sample; DESeq2 minutes.
+
+================================================================================================
+PART I — OUTPUTS, LOGS, REPORT, REPRODUCIBILITY
+================================================================================================
+Project folder RNAseq_<name>/:
+  config/ (project_config.yaml, config_used_*.yaml) · data/ (fastq/, trimmed/, raw/ .sra,
+  metadata/ validation reports) · reference/ (links + reference_manifest.yaml) · qc/ (fastqc_*,
+  multiqc_*, fastp/, assessment/raw|trimmed quality_assessment.json/.tsv/.html) · alignment/
+  (bam/*.sorted.bam+.bai, reports/alignment_summary.tsv, bam_qc_summary.tsv, strandedness.json)
+  · stringtie/ (per sample, abundance/, merged/ TPM matrices) · featurecounts/ · counts/
+  (gene_count_matrix.tsv/.csv, sample_metadata.tsv, design.json, count_matrix_summary.txt) ·
+  results/deseq2/<contrast>/ (full_results, significant_results, upregulated, downregulated,
+  top_up/down, statistics.txt, plot_data/) · results/plots/ (PCA, distance & correlation
+  heatmaps, library sizes, count distributions; per contrast MA, volcano, significant & top-gene
+  heatmaps; PNG+PDF) · results/tables/ · logs/ (pipeline.log, pipeline_errors.log,
+  command_history.log, commands.jsonl, per-tool logs) · reports/final_pipeline_report.html ·
+  checkpoints/ · pipeline_manifest/ (manifest.json/.yaml, environment.yml, package_versions.txt,
+  system_information.txt, R_sessionInfo.txt) · project.json (state).
+The HTML report links every section to its files and shows thresholds, parameters, versions,
+warnings; pilot runs carry a banner.
+
+================================================================================================
+PART J — SAFEGUARDS, ERROR HANDLING, RESUME, RECOVERY
+================================================================================================
+  - No shell: commands are argument lists; empty arguments rejected; paths validated; project and
+    sample names restricted; accessions validated by regex; path traversal blocked.
+  - Pipefail semantics for hisat2 | samtools sort; timeouts; Ctrl-C terminates the process group
+    and partial outputs are never used.
+  - Every failure prints STATUS: FAILED, Stage, Sample, Problem, Likely cause, Recommended action,
+    and is logged with the exact command, exit codes and log path.
+  - Resume: status table (VALID / INVALID + reason / PENDING); valid stages are re-verified, not
+    recomputed; valid per-sample BAMs are not re-aligned.
+  - Recovery: projects without samples/reference are asked for them; all-failed samples → retry or
+    replace; replacing data keeps downloaded files and invalidates dependent checkpoints.
+  - Storage pre-flight: refuses when free < estimate, asks when borderline; cleanup offers only
+    intermediates whose downstream outputs are validated (never raw data, references, BAMs).
+  - System checks: FAT32 refused (4 GB file limit), 9p/Windows mounts warned, RAM/CPU warnings.
+  - Bad --config path/YAML → clear error (no traceback).
+
+================================================================================================
+PART K — TESTING AND VALIDATION EVIDENCE
+================================================================================================
+  Run: ~/miniforge3/envs/rnaseq-tools/bin/python -m pytest tests -q   (≈2 min; 127 tests)
+  - Unit (58+): validators, config rules, FASTQ validator (truncation, gzip corruption, mate
+    mismatch, bad characters, Phred+64), pairing, GEO parsing (incl. reanalysis/SuperSeries),
+    count-matrix rejections, design (replicates, confounding, formulas), checkpoints (tamper,
+    cascade, content fingerprints), strandedness calls, reference compatibility (chr style,
+    assembly mismatch by coordinates), bacterial CDS detection, NCBI package building, store
+    scanning, single-cell detection, pilot limits, Entrez helpers.
+  - Failure: missing tool, pipefail, empty args, no shell expansion, timeout, Ctrl-C kill,
+    corrupted/truncated BAM, insufficient disk, invalid thresholds, R rejects bad designs.
+  - Integration (10): the REAL interactive CLI driven by scripted answers on a synthetic dataset
+    with KNOWN truth (tests/data/make_synthetic.py: 3 chromosomes, 60 genes, 6 samples,
+    GENE0001-0008 up 4×, GENE0009-0016 down 4×, reverse-stranded, 15% adapter read-through).
+    Checks: all 16 checkpoints, trimming recommended, primary == 2×input reads, strandedness
+    "reverse", matrix shape, ≥14/16 true DE recovered with ≤1 false positive (observed 16/16, 0),
+    plots, report, manifest, resume re-runs nothing, dry-run executes nothing, corrupted FASTQ
+    stops before alignment.
+  Real-data validations performed:
+  - Yeast GSE53720 (calorie restriction vs normal, pilot 500k reads): forward strandedness
+    inferred; ADH2 +8.9, JEN1 +7.1, FBP1 +5.8, PCK1 +4.3, SUC2 +2.4 log2FC up (biologically
+    correct); ~68% alignment explained by rRNA (rDNA locus chrXII).
+  - NCBI SRA route (SRR7361181) incl. vdb-validate rejecting a corrupted .sra (exit 3).
+  - E. coli UTI89 reference via NCBI search: 4,954 CDS genes, plain index, correct flags.
+  - GEO reanalysis GSE309855 → 94 runs from GSE199596 in ~12 s.
+  - Single-cell study (SRR23333328, 10x v3.1) correctly refused.
+
+================================================================================================
+PART L — INSTALLATION AND ENVIRONMENT
+================================================================================================
+  1 Miniforge:  curl -L -O https://github.com/conda-forge/miniforge/releases/latest/download/
+                Miniforge3-Linux-x86_64.sh && bash Miniforge3-Linux-x86_64.sh -b -p ~/miniforge3
+  2 Envs:       ~/miniforge3/bin/mamba env create -f envs/rnaseq-tools.yml
+                ~/miniforge3/bin/mamba env create -f envs/rnaseq-r.yml
+  3 Check:      ./rnaseq_pipeline --check    (or main menu 4, which can install after asking)
+  No activation needed; the tool finds envs under ~/miniforge3/envs. No sudo ever.
+  Tested versions: FastQC 0.12.1, MultiQC 1.35, fastp 1.3.7, HISAT2 2.2.3, samtools 1.24,
+  StringTie 3.0.3 (StringTie2 line), featureCounts 2.1.1, SRA Toolkit 3.4.1, RSeQC 5.0.5,
+  R 4.5.3, DESeq2 1.50.2.
+  Author's machine: WSL2 Ubuntu 24.04, 12 cores, 15 GB RAM, ext4 home (~940 GB free), Windows
+  drives under /mnt/* (slow 9p; avoid for projects). Local testing budget: 50 GB; full human
+  datasets are intended for a bigger machine. Personal config: ~/my_rnaseq.yaml (chmod 600;
+  holds NCBI email/API key; outside the repo — never commit it).
+
+================================================================================================
+PART M — HISTORY
+================================================================================================
+  2026-09-19 5dcc651  v1.0.0: complete pipeline, docs, 111 tests; synthetic + yeast validation.
+                      Bugs fixed during build: FastQC report path (with_suffix on ".trimmed"),
+                      cascade invalidation, content-based fingerprints, heatmap colour consistency.
+  2026-09-20 4f99440  Any-organism references via NCBI; bacterial CDS handling; hisat2-build crash
+                      on empty splice sites; --no-spliced-alignment; ENA→SRA fallback when ENA has
+                      no mirrored FASTQ (user's E. coli GSE272617 run failed on this).
+  2026-09-20 3568c8a  Stopped tracking stray project folders (1/, 8/) created inside the repo.
+  2026-09-20 bb0aa19  NCBI Entrez dataset discovery (GEO/SRA search, einfo field menus), API key.
+  2026-09-20 e14ea85  Docs for the above.
+  2026-09-21 37dc0c5  Reference management: prepare without a project; reuse local FASTA+GTF
+                      folders; delete references; menu-default fix; .gitattributes.
+  2026-09-22 558a060  GEO reanalysis/SuperSeries resolution; no dead-end without inputs.
+  2026-09-22 08a9c11  Single-cell detection/refusal; retry failed samples on re-run; replace data
+                      source; no stage-screen loop; clean --config errors; pilot ≥1000 reads.
+
+================================================================================================
+PART N — KNOWN LIMITATIONS AND ROADMAP
+================================================================================================
+N.1 Remaining Version 1 improvements (proposed, not yet done)
+  1 Multi-factor designs: interactions, time course (LRT), continuous covariates.
+  2 Resumable SRA downloads mid-file (ENA route already resumes .part files).
+  3 Parallel downloads (samples are fetched one at a time).
+  4 Sample selection by name/pattern (currently by number).
+  5 rRNA percentage per sample in QC/report.
+  6 Non-interactive mode (answers file) for unattended runs.
+  7 Gene symbols/descriptions in result tables for non-model organisms.
+N.2 Version 2 (design only): STAR/Salmon/kallisto, tximport, HPC/SLURM, containers
+  (runner.run_pipeline is the single execution point), parallel scheduling, config profiles,
+  richer designs, automated enrichment, pipeline comparison, possibly a single-cell branch.
+N.3 Version 3 (design only): web application (upload, accession fetch, monitoring, results) —
+  core modules are UI-free; main refactor needed: non-interactive decision inputs for quality
+  gate, strandedness and design.
+
+================================================================================================
+PART O — GUIDANCE FOR AN AI ASSISTANT CONTINUING THIS WORK
+================================================================================================
+  - Read docs/DEVELOPER_GUIDE.md and PIPELINE_METHODS.md; code is the source of truth.
+  - Adding a stage: subclass workflow.Stage (key, title, depends, expensive, settings;
+    overview/check_inputs/estimate_gb/execute/revalidate), insert into STAGES, add report section
+    and tests. execute() must honour ctx.dry_run and return (outputs, params, summary).
+  - All external commands via runner.run / run_pipeline; never subprocess with shell=True.
+  - New parameters: add to config/default_config.yaml WITH a comment, validate in config.validate.
+  - Menus: adding an entry shifts numbers — update tests/integration/test_end_to_end.py
+    (new_project_answers: data input "5" = local FASTQ, organism "5" = custom) and the docs.
+  - Never guess biology: groups, strandedness, assembly, trimming are user-confirmed.
+  - Keep raw data immutable; write *.partial then rename after validation.
+  - Test before committing: full pytest suite (127 tests) must pass.
+  - Commits: author vipin839; end messages with the Co-Authored-By line used in history; push to
+    origin main only when the user asks. Never commit ~/my_rnaseq.yaml or projects/ folders.
+  - The user's own projects live in ~/vipin/ (e.g. RNAseq_ritvik1, test11); test on COPIES.
+
+================================================================================================
+PART P — GLOSSARY
+================================================================================================
+  BAM/SAM   binary/text alignment files · BED12 transcript model format used by RSeQC
+  BH/padj   Benjamini–Hochberg adjusted p-value (FDR) · CDS coding sequence feature
+  Contrast  the comparison tested (numerator vs denominator/baseline level)
+  Design    model formula (~ condition) · Dispersion  extra-Poisson variability per gene
+  ENA       European Nucleotide Archive · GEO  Gene Expression Omnibus (GSE series, GSM samples)
+  GSE reanalysis  GEO series re-using other series' samples · SuperSeries  umbrella of sub-series
+  GTF       gene annotation format · HISAT2  splice-aware aligner · MultiQC  report aggregator
+  Pilot     first-N-reads subset for testing only · Phred  quality score scale
+  RSeQC     RNA-seq QC toolkit (infer_experiment → strandedness) · SRA  NCBI read archive
+  SRR/SRX/SRP/PRJNA  run / experiment / study / BioProject accessions
+  Strandedness  unstranded / forward / reverse library orientation
+  TPM       transcripts per million (StringTie output; not DESeq2 input)
+  UMI       unique molecular identifier (single-cell) · VST  variance-stabilising transformation
+================================================================================================
+END OF DOCUMENT
+================================================================================================

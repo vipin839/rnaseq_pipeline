@@ -17,14 +17,14 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ROOT, have
+from conftest import RSCRIPT, ROOT, have
 
 sys.path.insert(0, str(ROOT / "tests" / "data"))
 import make_synthetic  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not have("fastqc", "hisat2", "samtools", "featureCounts", "stringtie", "fastp", "multiqc")
-    or not (Path.home() / "miniforge3/envs/rnaseq-r/bin/Rscript").exists(),
+    or RSCRIPT is None,
     reason="bioinformatics tools / R env not installed")
 
 LAUNCHER = ROOT / "rnaseq_pipeline"

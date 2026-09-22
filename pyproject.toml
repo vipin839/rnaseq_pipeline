@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rnaseq-pipeline"
+dynamic = ["version"]
+description = "Interactive, validated and resumable bulk RNA-seq pipeline (HISAT2, featureCounts, StringTie2, DESeq2)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "vipin839" }]
+requires-python = ">=3.10"
+# Only the application layer is a pip dependency. The scientific runtime (FastQC, HISAT2, samtools,
+# R/DESeq2, ...) is NOT pip-installable; it comes from conda/Bioconda — see docs/INSTALLATION.md and
+# `rnaseq-pipeline --check`.
+dependencies = ["PyYAML>=5.4"]
+keywords = ["bioinformatics", "RNA-seq", "DESeq2", "HISAT2", "featureCounts", "transcriptomics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4", "build>=1.0"]
+
+[project.scripts]
+rnaseq-pipeline = "rnaseq_pipeline.cli:main"
+rnaseq_pipeline = "rnaseq_pipeline.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vipin839/rnaseq_pipeline"
+Documentation = "https://github.com/vipin839/rnaseq_pipeline/tree/main/docs"
+Issues = "https://github.com/vipin839/rnaseq_pipeline/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "rnaseq_pipeline.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rnaseq_pipeline = ["R/*.R", "config/*.yaml", "envs/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E501", "E741", "B008", "B905"]

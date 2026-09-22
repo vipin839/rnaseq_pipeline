@@ -7,11 +7,23 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "python"))
+sys.path.insert(0, str(ROOT / "src"))
 
-TOOLS_BIN = Path.home() / "miniforge3" / "envs" / "rnaseq-tools" / "bin"
+# Scientific tools: $RNASEQ_TOOLS_BIN, else the default conda env, else whatever is on PATH (e.g. CI env).
+TOOLS_BIN = Path(os.environ.get("RNASEQ_TOOLS_BIN", Path.home() / "miniforge3" / "envs" / "rnaseq-tools" / "bin"))
 if TOOLS_BIN.is_dir():
     os.environ["PATH"] = f"{TOOLS_BIN}{os.pathsep}{os.environ['PATH']}"
+
+
+def _find_rscript():
+    cand = os.environ.get("RNASEQ_RSCRIPT") or str(Path.home() / "miniforge3" / "envs" / "rnaseq-r" / "bin" / "Rscript")
+    if Path(cand).is_file():
+        return Path(cand)
+    found = shutil.which("Rscript")
+    return Path(found) if found else None
+
+
+RSCRIPT = _find_rscript()
 
 
 def have(*tools):

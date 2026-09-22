@@ -4,11 +4,11 @@ import platform
 import shutil
 from pathlib import Path
 
-from . import PIPELINE_ROOT, runner, ui
+from . import PACKAGE_DIR, runner, ui
 from . import config as C
 
-ENV_FILES = {"tools": PIPELINE_ROOT / "envs" / "rnaseq-tools.yml",
-             "r": PIPELINE_ROOT / "envs" / "rnaseq-r.yml"}
+ENV_FILES = {"tools": PACKAGE_DIR / "envs" / "rnaseq-tools.yml",
+             "r": PACKAGE_DIR / "envs" / "rnaseq-r.yml"}
 
 
 class Environments:

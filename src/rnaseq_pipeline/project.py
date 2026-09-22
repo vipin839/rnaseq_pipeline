@@ -6,11 +6,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import PIPELINE_ROOT, PipelineError, __version__
+from . import PipelineError, __version__
 from . import config as C
 from . import validators as V
 
-DEFAULT_PROJECTS_DIR = PIPELINE_ROOT / "projects"
+# Overridden by config key `projects_dir` or --projects-dir; never inside the (possibly read-only) package.
+DEFAULT_PROJECTS_DIR = Path.home() / "rnaseq_projects"
 
 LAYOUT = [
     "config",

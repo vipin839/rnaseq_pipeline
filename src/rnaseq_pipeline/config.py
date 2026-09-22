@@ -6,11 +6,12 @@ from pathlib import Path
 
 import yaml
 
-from . import PIPELINE_ROOT, PipelineError
+from . import PACKAGE_DIR, PipelineError
 from . import validators as V
 
-DEFAULT_CONFIG = PIPELINE_ROOT / "config" / "default_config.yaml"
-CATALOG = PIPELINE_ROOT / "config" / "reference_catalog.yaml"
+DEFAULT_CONFIG = PACKAGE_DIR / "config" / "default_config.yaml"
+CATALOG = PACKAGE_DIR / "config" / "reference_catalog.yaml"
+USER_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rnaseq-pipeline" / "config.yaml"
 
 STRANDEDNESS = ("auto", "unstranded", "forward", "reverse")
 

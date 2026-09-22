@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Bulk RNA-seq Pipeline v1 — main entry point.
+"""Run the pipeline straight from a source checkout (no installation needed).
 
     python3 rnaseq_pipeline.py            # interactive menu
-    python3 rnaseq_pipeline.py --dry-run  # show what would run
-    python3 rnaseq_pipeline.py --help
+    python3 rnaseq_pipeline.py --check    # health check
+
+After `pip install .` / `pipx install .` the same program is available anywhere as `rnaseq-pipeline`.
 """
-import os
 import sys
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent
 
 if sys.version_info < (3, 10):
     sys.exit(f"[ERROR] Python 3.10+ is required (found {sys.version.split()[0]}).")
@@ -17,16 +15,12 @@ if sys.version_info < (3, 10):
 try:
     import yaml  # noqa: F401
 except ImportError:
-    # fall back to the pipeline's own conda env python, which has PyYAML
-    for cand in (Path.home() / "miniforge3/envs/rnaseq-tools/bin/python",):
-        if cand.exists() and os.environ.get("RNASEQ_REEXEC") != "1":
-            os.environ["RNASEQ_REEXEC"] = "1"
-            os.execv(str(cand), [str(cand), __file__, *sys.argv[1:]])
-    sys.exit("[ERROR] PyYAML is missing. Install it with:  python3 -m pip install --user pyyaml")
+    sys.exit("[ERROR] PyYAML is missing. Install it with:  python3 -m pip install --user pyyaml\n"
+             "        (or install the pipeline with pipx/conda, which brings it automatically)")
 
-sys.path.insert(0, str(ROOT / "python"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from rnaseq.cli import main  # noqa: E402
+from rnaseq_pipeline.cli import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

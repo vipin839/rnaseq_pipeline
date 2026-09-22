@@ -7,7 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import (PIPELINE_ROOT, PipelineError, UserAbort, __version__, data_manager, dependency_manager, design,
+import yaml
+
+from . import (PipelineError, UserAbort, __version__, data_manager, dependency_manager, design,
                entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
 from . import config as C
 from . import validators as V
@@ -29,25 +31,32 @@ class App:
     def __init__(self, args):
         self.args = args
         self.cfg = C.load()
+        self.config_sources = [str(C.DEFAULT_CONFIG)]
+        overrides = []
+        if C.USER_CONFIG.is_file():
+            overrides.append(("user config", C.USER_CONFIG))
         if args.config:
             try:
-                path = V.existing_file(args.config)
+                overrides.append(("--config", V.existing_file(args.config)))
             except ValueError as e:
                 raise PipelineError(f"--config: {e}", remedy="check the path of your personal config file, "
                                     "e.g. ~/my_rnaseq.yaml")
+        for label, path in overrides:
             try:
                 extra = C.load_yaml(path)
-            except Exception as e:  # malformed YAML
-                raise PipelineError(f"--config: {path} is not valid YAML", cause=str(e)[:300],
+            except yaml.YAMLError as e:
+                raise PipelineError(f"{label}: {path} is not valid YAML", cause=str(e)[:300],
                                     remedy="fix the file (indentation, quotes) and start again")
             if not isinstance(extra, dict):
-                raise PipelineError(f"--config: {path} must contain settings like 'ncbi:' / 'threads:'")
+                raise PipelineError(f"{label}: {path} must contain settings like 'ncbi:' / 'threads:'")
             self.cfg = C.deep_merge(self.cfg, extra)
-            C.require_valid(self.cfg, os.cpu_count())
+            self.config_sources.append(str(path))
+        C.require_valid(self.cfg, os.cpu_count())
         entrez.configure(self.cfg)
         self.envs = environment_manager.Environments(self.cfg)
         self.envs.activate()
-        self.projects_dir = Path(args.projects_dir).expanduser() if args.projects_dir else DEFAULT_PROJECTS_DIR
+        self.projects_dir = Path(os.path.expanduser(args.projects_dir or self.cfg.get("projects_dir")
+                                                    or str(DEFAULT_PROJECTS_DIR)))
 
     # ------------------------------------------------------------------ helpers
     def sysinfo(self, path=None):

@@ -2,9 +2,9 @@
 import json
 from pathlib import Path
 
-from . import PIPELINE_ROOT, PipelineError, runner, ui
+from . import PACKAGE_DIR, PipelineError, runner, ui
 
-R_MAIN = PIPELINE_ROOT / "R" / "deseq2_pipeline.R"
+R_MAIN = PACKAGE_DIR / "R" / "deseq2_pipeline.R"
 
 
 def build_params(project, cfg, design, orgdb=None):

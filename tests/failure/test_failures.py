@@ -6,9 +6,9 @@ import time
 
 import pytest
 
-from conftest import have
-from rnaseq import PipelineError, bam_manager, logger, runner, storage
-from rnaseq import config as C
+from conftest import RSCRIPT, have
+from rnaseq_pipeline import PipelineError, bam_manager, logger, runner, storage
+from rnaseq_pipeline import config as C
 
 
 @pytest.fixture(autouse=True)
@@ -99,11 +99,10 @@ def test_invalid_statistical_thresholds():
         C.require_valid(cfg, 4)
 
 
-@pytest.mark.skipif(not (__import__("pathlib").Path.home() / "miniforge3/envs/rnaseq-r/bin/Rscript").exists(),
-                    reason="R env not installed")
+@pytest.mark.skipif(RSCRIPT is None, reason="R env not installed")
 @pytest.mark.parametrize("case", ["missing_sample", "confounded", "no_replicates", "bad_level"])
 def test_r_rejects_bad_design(tmp_path, case):
-    from rnaseq import r_bridge
+    from rnaseq_pipeline import r_bridge
     counts = tmp_path / "c.tsv"
     counts.write_text("Gene_ID\tA\tB\tC\tD\ng1\t10\t20\t30\t40\ng2\t5\t6\t7\t8\n")
     meta = tmp_path / "m.tsv"
@@ -118,6 +117,6 @@ def test_r_rejects_bad_design(tmp_path, case):
               "variable_of_interest": "condition", "reference_level": "C", "contrasts": [["T", "C"]]}
     pp = tmp_path / "p.json"
     pp.write_text(json.dumps(params))
-    rs = __import__("pathlib").Path.home() / "miniforge3/envs/rnaseq-r/bin/Rscript"
+    rs = RSCRIPT
     with pytest.raises(PipelineError, match="R/DESeq2 step failed"):
         r_bridge.run(rs, pp, tmp_path / "r.log", validate_only=True)
