@@ -71,7 +71,7 @@ positives, 58 genes tested, 16 checkpoints**. This is the reference outcome ever
 | Project health | non-interactive project validation | MISSING (menu only) (F15) | VERIFIED (F15 fixed) — `test_validate_project_passes_on_finished_project`, `test_validate_project_fails_on_edited_count_matrix` |
 | Packaging | installable package, global command | MISSING — no pyproject, license, entry point (F16) | VERIFIED (F16 fixed) — `packaging/` (venv + pipx, 8 tests) |
 | Packaging | no dependence on checkout paths | **FAILS** — version from `VERSION` beside code; projects default inside the code dir (F16) | VERIFIED (F16 fixed) — `packaging::test_projects_and_state_live_in_home_not_package`, `test_installed_command_from_any_directory` |
-| Packaging | Bioconda recipe | MISSING | PARTIALLY VERIFIED — `bioconda-utils lint`: All checks OK; see local build result in docs/TESTING.md; not submitted |
+| Packaging | Bioconda recipe | MISSING | VERIFIED locally — `bioconda-utils lint`: All checks OK; `conda-build` succeeded and the recipe tests passed (`--check`: 38 passed, 1 warning [NCBI email], 0 failed). Not submitted to Bioconda (user decision) |
 | Release | single version source, CHANGELOG, tag, CI | MISSING — no CI, no release process (F17) | VERIFIED (F17 fixed) — `unit/test_release.py` (6 tests); CI workflow |
 
 ## 3. Findings (BEFORE)

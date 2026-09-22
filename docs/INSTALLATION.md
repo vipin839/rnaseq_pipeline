@@ -27,7 +27,7 @@ rnaseq-pipeline --check
 ## Option A — application with pipx, runtime with conda (recommended today)
 
 ```bash
-# 1. the command (isolated environment, exposed on PATH)
+# 1. the command (isolated environment, exposed on PATH) — verified in a clean HOME
 pipx install git+https://github.com/vipin839/rnaseq_pipeline.git
 
 # 2. conda (skip if you already have conda/mamba)
@@ -67,8 +67,11 @@ mamba activate rnaseq
 rnaseq-pipeline --check
 ```
 
-**Status:** the recipe passes `bioconda-utils lint` (All checks OK). It becomes installable from Bioconda only after
-it has been submitted to and accepted by bioconda-recipes; see [RELEASE.md](RELEASE.md). Until then, use option A.
+**Status:** the recipe passes `bioconda-utils lint` (All checks OK). The package was built locally with `conda-build`
+(from the release source archive) and its recipe tests passed in a fresh environment, including
+`rnaseq-pipeline --check`: `HEALTH: WARNING (38 passed, 1 warnings, 0 failed)` — the warning is the unset NCBI email;
+the mini-job counted 200/200 read pairs and DESeq2 loaded. The recipe becomes installable from Bioconda only after it
+has been submitted to and accepted by bioconda-recipes; see [RELEASE.md](RELEASE.md). Until then, use option A.
 
 ## Personal settings
 

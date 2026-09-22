@@ -25,6 +25,16 @@ then `PATH`. R is found from `$RNASEQ_RSCRIPT`, then `~/miniforge3/envs/rnaseq-r
 
 Counts are those of release 1.1.0 (204 tests; 196 run by default, 8 packaging tests need `RNASEQ_PACKAGING_TESTS=1`).
 
+## Distribution checks (release 1.1.0)
+
+| Method | How it was checked | Result |
+|---|---|---|
+| wheel/sdist | `python -m build`, `twine check` | both PASSED, no build warnings |
+| pip into a fresh venv, pipx | `tests/packaging` (8 tests) | pass |
+| `pipx install git+https://github.com/vipin839/rnaseq_pipeline.git` | clean HOME and PATH | installs `rnaseq-pipeline` and `rnaseq_pipeline`; `--version` 1.1.0; package data found |
+| Bioconda recipe | `bioconda-utils lint`; `conda-build` with the sdist as source; recipe tests in a fresh env | lint OK; build OK; tests pass incl. `--check` (0 failed) |
+| GitHub Actions | lint, 8 unit jobs (Ubuntu 22.04/24.04 × Python 3.10–3.13), package, integration with the real tools | all 11 jobs green (commit 98e520c) |
+
 ## Synthetic truth dataset
 
 `tests/data/make_synthetic.py OUT [pairs] [reverse|forward|unstranded] [paired|single]` writes a 3-chromosome genome, a
