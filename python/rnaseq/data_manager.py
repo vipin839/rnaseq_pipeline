@@ -123,32 +123,72 @@ def existing_project_fastqs(project):
 
 # ------------------------------ public data ------------------------------
 
+def _runs_for_experiments(srx_list):
+    """Runs for many SRA experiments: query each parent study once instead of every experiment."""
+    wanted, runs, done_studies = set(srx_list), [], set()
+    remaining = list(srx_list)
+    while remaining:
+        probe = remaining[0]
+        got = ena_manager.runs_for(probe)
+        study = next((r.get("study_accession") for r in got if r.get("study_accession")), None)
+        if study and study not in done_studies and len(remaining) > 3:
+            done_studies.add(study)
+            batch = [r for r in ena_manager.runs_for(study) if r.get("experiment_accession") in wanted]
+            if batch:
+                runs += batch
+                covered = {r["experiment_accession"] for r in batch}
+                remaining = [x for x in remaining if x not in covered]
+                continue
+        runs += got
+        remaining = remaining[1:]
+    missing = wanted - {r.get("experiment_accession") for r in runs}
+    for srx in sorted(missing):  # not in ENA (yet): ask NCBI directly
+        runs += [_runinfo_record(i) for i in sra_manager.runinfo(srx)]
+    still = wanted - {r.get("experiment_accession") for r in runs}
+    if still:
+        ui.warn(f"{len(still)} GEO sample(s) have no retrievable sequencing runs and were skipped: "
+                f"{', '.join(sorted(still)[:5])}{'...' if len(still) > 5 else ''}")
+    return runs
+
+
+def _runinfo_record(i):
+    """NCBI runinfo row -> the ENA-style run dict used everywhere else (no direct FASTQ URLs: SRA route)."""
+    return {"run_accession": i["Run"], "experiment_accession": i.get("Experiment", ""),
+            "sample_accession": i.get("BioSample", ""), "study_accession": i.get("BioProject", ""),
+            "library_layout": i.get("LibraryLayout", ""), "library_strategy": i.get("LibraryStrategy", ""),
+            "library_source": i.get("LibrarySource", ""), "instrument_model": i.get("Model", ""),
+            "read_count": i.get("spots", ""), "scientific_name": i.get("ScientificName", ""),
+            "tax_id": i.get("TaxID", ""), "sample_title": i.get("SampleName", ""),
+            "fastq_bytes": "", "_files": []}
+
+
 def resolve_public(accessions, source):
     """Resolve accessions to run records with metadata. Returns (runs, study_titles)."""
     runs, titles, gsm_meta = [], set(), {}
     for acc, kind in accessions:
         if kind == "geo_series":
-            title, gsms = geo_manager.series(acc)
+            title, gsms, notes = geo_manager.series(acc)
+            for n in notes:
+                ui.info(n)
             titles.add(title)
+            srx_to_gsm = {}
             for g in gsms:
                 gsm_meta[g["gsm"]] = g
                 for srx in g["srx"]:
-                    for r in ena_manager.runs_for(srx):
-                        r["_gsm"] = g["gsm"]
-                        runs.append(r)
+                    srx_to_gsm[srx] = g["gsm"]
+            if not srx_to_gsm:
+                raise PipelineError(f"{acc}: none of its {len(gsms)} sample(s) link to SRA raw data",
+                                    cause="the series may be microarray, or raw reads are held elsewhere (e.g. dbGaP)")
+            ui.running(f"Looking up sequencing runs for {len(srx_to_gsm)} GEO sample(s)...")
+            for r in _runs_for_experiments(list(srx_to_gsm)):
+                r["_gsm"] = srx_to_gsm.get(r.get("experiment_accession"))
+                runs.append(r)
         elif kind == "geo_sample":
             raise PipelineError("single GSM accessions are not supported; enter the GSE series or the SRR runs")
         else:
             got = ena_manager.runs_for(acc)
             if not got and source == "sra":
-                info = sra_manager.runinfo(acc)
-                got = [{"run_accession": i["Run"], "experiment_accession": i.get("Experiment", ""),
-                        "sample_accession": i.get("BioSample", ""), "study_accession": i.get("BioProject", ""),
-                        "library_layout": i.get("LibraryLayout", ""), "library_strategy": i.get("LibraryStrategy", ""),
-                        "library_source": i.get("LibrarySource", ""), "instrument_model": i.get("Model", ""),
-                        "read_count": i.get("spots", ""), "scientific_name": i.get("ScientificName", ""),
-                        "tax_id": i.get("TaxID", ""), "sample_title": i.get("SampleName", ""),
-                        "fastq_bytes": "", "_files": []} for i in info]
+                got = [_runinfo_record(i) for i in sra_manager.runinfo(acc)]
             if not got:
                 raise PipelineError(f"no sequencing runs found for {acc}",
                                     remedy="check that the accession is public and correct")

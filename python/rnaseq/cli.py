@@ -119,8 +119,14 @@ class App:
         ctx.cp.write("project_initialized", [p.path("pipeline_manifest", "system_information.txt")],
                      params={"name": name})
         ui.ok(f"project created: {p.root}")
-        self.choose_data(p)
-        self.select_reference(p)
+        try:
+            self.choose_data(p)
+            self.select_reference(p)
+        except UserAbort:
+            p.unlock()
+            ui.info(f"project '{p.name}' was saved without complete inputs. Open it again with "
+                    "'Resume Existing Project' and you will be asked for the missing data/reference.")
+            raise
         self.optional_databases(p)
         self.select_samples(p)
         if ui.ask_yes_no("Start the pipeline now?", default=True):
@@ -585,11 +591,12 @@ class App:
             workflow.show_status(ctx)
             c = ui.choose(f"PROJECT: {p.name}", [
                 "Continue pipeline (run remaining stages)", "Re-run a specific stage", "Select samples (all / subset)",
-                "Samples: status / re-include failed", "Choose data source (new projects only)",
+                "Samples: status / re-include failed", "Choose data source (projects without samples)",
                 "Change reference", "Experimental design (edit / confirm)", "Clean up intermediate files",
                 "Dry run (show what would be executed)", "Return to main menu"])
             if c == 0:
-                workflow.run_pipeline(ctx)
+                self.ensure_inputs(p)
+                workflow.run_pipeline(self.context(p))
             elif c == 1:
                 i = ui.choose("Stage", [s.title for s in workflow.STAGES])
                 st = workflow.STAGES[i]
@@ -618,6 +625,15 @@ class App:
                 self.dry_run(p)
             else:
                 return
+
+    def ensure_inputs(self, p):
+        """A project must have samples and a reference before the pipeline can run: ask for what is missing."""
+        if not p.samples:
+            ui.warn("this project has no samples yet — choose a data source now")
+            self.choose_data(p)
+        if not p.state.get("reference"):
+            ui.warn("this project has no reference genome yet — choose one now")
+            self.select_reference(p)
 
     def samples_menu(self, p):
         rows = [(s, r.get("status"), r.get("failed_stage") or "", (r.get("fail_reason") or "")[:60])

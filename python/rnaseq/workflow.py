@@ -181,7 +181,8 @@ class DataStage(Stage):
 
     def check_inputs(self, ctx):
         if not ctx.samples:
-            return ["no samples defined — choose a data source first"]
+            return ["no samples defined — return to the project menu and choose 'Continue pipeline' "
+                    "(it asks for a data source) or 'Choose data source'"]
         want = ctx.cfg.get("read_type", "auto")
         have = ctx.project.state.get("read_type")
         if want != "auto" and have and want != have:

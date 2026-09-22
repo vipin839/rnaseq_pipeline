@@ -379,3 +379,21 @@ def test_scan_store_finds_prepared_and_plain_folders(tmp_path):
     assert found["ecoli_UTI89"]["kind"] == "files" and len(found["ecoli_UTI89"]["fastas"]) == 2
     assert "2 FASTA" in found["ecoli_UTI89"]["label"]
     assert reference_manager.scan_store(tmp_path / "does-not-exist") == []
+
+
+# ---------------- GEO reanalysis / SuperSeries records ----------------
+def test_geo_relations_reanalysis_and_superseries():
+    head = ("^SERIES = GSE309855\n!Series_type = Third-party reanalysis\n"
+            "!Series_relation = Reanalysis of: GSM5975848\n!Series_relation = Reanalysis of: GSM5975849\n"
+            "!Series_relation = BioProject: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1\n")
+    rel = geo_manager._relations(head)
+    assert rel == {"reanalysis_gsm": ["GSM5975848", "GSM5975849"], "subseries": []}
+    sup = "!Series_relation = SuperSeries of: GSE100\n!Series_relation = SuperSeries of: GSE101\n"
+    assert geo_manager._relations(sup)["subseries"] == ["GSE100", "GSE101"]
+
+
+def test_runinfo_record_shape():
+    rec = data_manager._runinfo_record({"Run": "SRR1", "Experiment": "SRX1", "LibraryLayout": "PAIRED",
+                                        "ScientificName": "Homo sapiens", "spots": "10"})
+    assert rec["run_accession"] == "SRR1" and rec["experiment_accession"] == "SRX1"
+    assert rec["library_layout"] == "PAIRED" and rec["_files"] == []  # no ENA URLs -> SRA download route
