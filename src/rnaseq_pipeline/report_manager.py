@@ -3,10 +3,12 @@ import csv
 import html
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 from . import __version__
+from .secrets import redacted
 
 CSS = """
 :root{--fg:#1d2330;--muted:#5b6475;--bg:#ffffff;--panel:#f5f7fa;--line:#dde2ea;--accent:#1f5fae;--ok:#2e7d32;--warn:#b26a00;--bad:#c62828}
@@ -72,6 +74,11 @@ def fmt_cell(c):
     return c
 
 
+def mark(key, value):
+    """A value the report validator re-derives independently from the result files."""
+    return f"<span data-check='{esc(key)}'>{esc(value)}</span>"
+
+
 def kv_table(pairs):
     return "<table class='kv'>" + "".join(f"<tr><td>{esc(k)}</td><td>{v}</td></tr>" for k, v in pairs) + "</table>"
 
@@ -103,12 +110,15 @@ def generate(ctx):
     ov = [("Project", esc(s["name"])), ("Project ID", esc(s["project_id"])), ("Created", esc(s["created"])),
           ("Report generated", datetime.now().strftime("%Y-%m-%d %H:%M")), ("Pipeline version", __version__),
           ("Data source", esc(s.get("data_source"))), ("Read type", esc(s.get("read_type"))),
-          ("Samples (active / total)", f"{len(ctx.samples)} / {len(p.samples)}"),
-          ("Reference", esc(ref.get("label"))), ("Strandedness", esc(f"{strand.get('value')} ({strand.get('source')})")),
-          ("Design", esc(d.get("formula"))),
-          ("Thresholds", f"padj &lt; {cfg['alpha']} and |log2FC| &ge; {cfg['log2fc_threshold']}")]
-    body = (("<p class='banner'>PILOT MODE: only a subset of reads was downloaded. Results are for pipeline "
-             "testing only and must not be interpreted biologically.</p>") if pilot else "") + kv_table(ov)
+          ("Samples (active / total)", f"{mark('samples_active', len(ctx.samples))} / {len(p.samples)}"),
+          ("Reference", mark("reference", ref.get("label"))),
+          ("Strandedness", f"{mark('strandedness', strand.get('value'))} ({esc(strand.get('source'))})"),
+          ("Design", mark("formula", d.get("formula"))),
+          ("Thresholds", f"padj &lt; {mark('alpha', cfg['alpha'])} and |log2FC| &ge; "
+                         f"{mark('log2fc_threshold', cfg['log2fc_threshold'])}")]
+    body = (("<p class='banner' data-check='pilot'>PILOT MODE: only a subset of reads was downloaded. Results "
+             "are for pipeline testing only and must not be interpreted biologically.</p>") if pilot else "") \
+        + kv_table(ov)
     sec("overview", "Project overview", body)
 
     rows = []
@@ -225,9 +235,10 @@ def generate(ctx):
         body += f"<h3>{esc(name)}</h3>" + kv_table([
             ("Comparison", esc(f"{c['numerator']} vs {c['denominator']} (denominator = baseline)")),
             ("Significance criteria", f"padj &lt; {summ.get('alpha')} AND |log2FC| &ge; {summ.get('log2fc_threshold')}"),
-            ("Genes tested", esc(c["genes_tested"])),
-            ("Significant", f"<b>{c['significant']}</b> (<span class='bad'>up {c['up']}</span>, "
-                            f"<span style='color:var(--accent);font-weight:600'>down {c['down']}</span>)"),
+            ("Genes tested", mark(f"tested:{name}", c["genes_tested"])),
+            ("Significant", f"<b>{mark(f'significant:{name}', c['significant'])}</b> (<span class='bad'>up "
+                            f"{mark(f'up:{name}', c['up'])}</span>, <span style='color:var(--accent);"
+                            f"font-weight:600'>down {mark(f'down:{name}', c['down'])}</span>)"),
             ("Files", " · ".join(link(R, cdir / f) for f in ("full_results.tsv", "significant_results.tsv",
                                                              "upregulated.tsv", "downregulated.tsv", "statistics.txt")))])
         body += "<div class='grid'>" + "".join(fig(R, pdir / f"{n}.png", t) for n, t in (
@@ -243,7 +254,7 @@ def generate(ctx):
     sec("errors", "Errors / warnings",
         (f"<pre>{esc(chr(10).join(lines))}</pre>" if lines else "<p class='ok'>No warnings or errors were logged.</p>")
         + f"<p>{link(R, errs)} · {link(R, p.path('logs', 'pipeline.log'))} · {link(R, p.path('logs', 'command_history.log'))}</p>")
-    sec("params", "Parameters", f"<pre>{esc(json.dumps(cfg, indent=2, default=str))}</pre>")
+    sec("params", "Parameters", f"<pre>{esc(json.dumps(redacted(cfg), indent=2, default=str))}</pre>")
     sec("repro", "Reproducibility",
         "<ul>" + "".join(f"<li>{link(R, p.path('pipeline_manifest', f))}</li>" for f in
                          ("manifest.json", "manifest.yaml", "environment.yml", "package_versions.txt",
@@ -259,3 +270,52 @@ def generate(ctx):
 <h1>Bulk RNA-seq analysis report</h1><p class="muted">{esc(s['name'])} · pipeline v{__version__}</p>
 {content}</main></body></html>""")
     return out
+
+
+# ------------------------------------------------------------------ independent report validation
+_ATTR_RE = re.compile(r"(?:href|src)='([^'#][^']*)'")
+_MARK_RE = re.compile(r"<span data-check='([^']+)'>([^<]*)</span>")
+
+
+def validate(ctx, report=None):
+    """Re-derive every checkable number in the report from the underlying files. Returns a list of problems."""
+    p = ctx.project
+    report = Path(report or p.path("reports", "final_pipeline_report.html"))
+    if not report.exists() or report.stat().st_size < 1000:
+        return ["report missing or empty"]
+    text = report.read_text(encoding="utf-8")
+    problems = []
+    if not text.rstrip().endswith("</html>"):
+        problems.append("report is truncated (no closing </html>)")
+    for ref in _ATTR_RE.findall(text):
+        if ref.startswith(("http://", "https://", "mailto:")):
+            continue
+        if not (report.parent / html.unescape(ref)).resolve().exists():
+            problems.append(f"broken link or image: {html.unescape(ref)}")
+    marks = {k: html.unescape(v) for k, v in _MARK_RE.findall(text)}
+    expected = {"samples_active": str(len(ctx.samples)), "alpha": str(ctx.cfg["alpha"]),
+                "log2fc_threshold": str(ctx.cfg["log2fc_threshold"]),
+                "strandedness": str((p.state.get("strandedness") or {}).get("value")),
+                "reference": str((p.state.get("reference") or {}).get("label")),
+                "formula": str((p.state.get("design") or {}).get("formula"))}
+    summ_file = p.path("results", "deseq2", "deseq2_summary.json")
+    if summ_file.exists():
+        for name, c in json.loads(summ_file.read_text())["contrasts"].items():
+            cdir = Path(c["dir"])
+            for key, fname in (("up", "upregulated.tsv"), ("down", "downregulated.tsv"),
+                               ("significant", "significant_results.tsv"), ("tested", "full_results.tsv")):
+                with open(cdir / fname) as fh:
+                    expected[f"{key}:{name}"] = str(sum(1 for line in fh if line.strip()) - 1)
+    for key, want in expected.items():
+        if key not in marks:
+            problems.append(f"report does not show '{key}'")
+        elif marks[key] != want:
+            problems.append(f"report shows {key} = {marks[key]}, but the files give {want}")
+    pilot = any(r.get("pilot_max_reads") for r in p.samples.values())
+    if pilot != ("data-check='pilot'" in text):
+        problems.append("pilot-mode banner " + ("missing" if pilot else "shown for a full-data run"))
+    body = re.sub(r"<pre>.*?</pre>", "", text, flags=re.S)
+    for placeholder in (">None<", ">nan<", "(missing)"):
+        if placeholder in body:
+            problems.append(f"report contains placeholder text {placeholder!r}")
+    return problems

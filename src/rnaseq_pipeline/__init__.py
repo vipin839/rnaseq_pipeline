@@ -26,3 +26,22 @@ class PipelineError(Exception):
 
 class UserAbort(Exception):
     """The user chose to cancel, or stdin closed."""
+
+
+class Terminated(KeyboardInterrupt):
+    """SIGTERM/SIGHUP received (kill, closed terminal, dropped SSH). Handled like Ctrl-C, then the program exits."""
+
+    def __init__(self, signame):
+        super().__init__(signame)
+        self.signame = signame
+
+
+def install_signal_handlers():
+    """Turn SIGTERM/SIGHUP into Terminated so child process groups are stopped and no partial output is used."""
+    import signal
+
+    def handler(signum, _frame):
+        raise Terminated(signal.Signals(signum).name)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, handler)

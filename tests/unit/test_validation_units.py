@@ -420,3 +420,67 @@ def test_pilot_size_limits():
     for good in (0, 1000, 500000):
         C.set_value(cfg, "download.max_reads", good)
         assert C.validate(cfg, 4) == [], good
+
+
+# ---------------- F7: independent count reconciliation ----------------
+def test_featurecounts_reconcile_invariants():
+    from rnaseq_pipeline import featurecounts
+    stats = {"A": {"total": 40003, "assigned": 39979}, "B": {"total": 39000, "assigned": 38000},
+             "C": {"total": 50000, "assigned": 50001}, "D": {"total": 40500, "assigned": 39000}}
+    frag = {"A": 40000, "B": 40000, "C": 40000, "D": 40000}
+    rows = {"A": {"secondary": "3", "supplementary": "0"}, "B": {"secondary": "0", "supplementary": "0"},
+            "C": {"secondary": "0", "supplementary": "0"}, "D": {"secondary": "10", "supplementary": "0"}}
+    errors, warns = featurecounts.reconcile(stats, frag, rows)
+    assert not any(e.startswith("A:") for e in errors)            # real synthetic numbers pass
+    assert any(e.startswith("B:") and "did not read the whole BAM" in e for e in errors)
+    assert any(e.startswith("C:") and "assigned" in e for e in errors)
+    assert any(w.startswith("D:") for w in warns) and not any(e.startswith("D:") for e in errors)
+
+
+def test_count_matrix_sums_checked_against_assigned():
+    m = {"A": [10, 5, 0], "B": [1, 2, 3]}
+    assert count_matrix.check_against_assigned(m, {"A": 15, "B": 6}) == []
+    probs = count_matrix.check_against_assigned(m, {"A": 15, "B": 7})
+    assert len(probs) == 1 and "B" in probs[0]
+    assert "no featureCounts summary" in count_matrix.check_against_assigned(m, {"A": 15})[0]
+
+
+def test_technical_replicates_are_summed():
+    genes = ["g1", "g2"]
+    m = {"S1_L001": [1, 2], "S1_L002": [3, 4], "S2_L001": [5, 6]}
+    out = count_matrix.collapse(genes, m, {"S1": ["S1_L001", "S1_L002"], "S2": ["S2_L001"]})
+    assert out == {"S1": [4, 6], "S2": [5, 6]}
+
+
+# ---------------- F8: DESeq2 tables re-derived independently ----------------
+def _full():
+    rows = [("g_up", "0.001", "2.0", "up"), ("g_down", "0.01", "-1.5", "down"), ("g_small", "0.001", "0.5", "ns"),
+            ("g_notsig", "0.2", "3.0", "ns"), ("g_na", "NA", "4.0", "ns"), ("g_edge", "0.04", "1.0", "up")]
+    return [{"gene_id": g, "padj": p, "log2FoldChange": l, "regulation": r} for g, p, l, r in rows]
+
+
+def test_threshold_sets_exact_match_passes():
+    from rnaseq_pipeline import r_bridge
+    full = _full()
+    up = [r for r in full if r["regulation"] == "up"]
+    down = [r for r in full if r["regulation"] == "down"]
+    assert r_bridge.check_threshold_sets(full, up, down, up + down, 0.05, 1.0) == []
+
+
+def test_threshold_sets_detect_missing_and_extra_genes():
+    from rnaseq_pipeline import r_bridge
+    full = _full()
+    up_missing_one = [r for r in full if r["gene_id"] == "g_up"]              # g_edge (|lfc| == t) dropped
+    down_with_extra = [r for r in full if r["gene_id"] in ("g_down", "g_small")]
+    probs = r_bridge.check_threshold_sets(full, up_missing_one, down_with_extra, up_missing_one, 0.05, 1.0)
+    assert any("missing from the table" in p and "upregulated" in p for p in probs)
+    assert any("do not meet" in p and "downregulated" in p for p in probs)
+
+
+def test_threshold_sets_detect_wrong_regulation_label():
+    from rnaseq_pipeline import r_bridge
+    full = _full()
+    full[0]["regulation"] = "ns"
+    up = [r for r in full if r["gene_id"] in ("g_up", "g_edge")]
+    down = [r for r in full if r["gene_id"] == "g_down"]
+    assert any("'regulation' column" in p for p in r_bridge.check_threshold_sets(full, up, down, up + down, 0.05, 1))

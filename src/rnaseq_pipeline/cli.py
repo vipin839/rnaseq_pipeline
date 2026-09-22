@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import (PipelineError, UserAbort, __version__, data_manager, dependency_manager, design,
+from . import (PipelineError, Terminated, install_signal_handlers, UserAbort, __version__, data_manager, dependency_manager, design,
                entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
 from . import config as C
 from . import validators as V
@@ -1054,6 +1054,7 @@ def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     ui.VERBOSE = args.verbose or bool(C.load().get("verbose"))
     logger.init_base_logging(args.verbose)
+    install_signal_handlers()
     runner.DRY_RUN = args.dry_run
     try:
         app = App(args)
@@ -1085,6 +1086,9 @@ def main(argv=None):
     except UserAbort:
         print()
         return 0
+    except Terminated as e:
+        print(f"\n[INFO] stopped by {e.signame}; the project can be resumed")
+        return 143
     except KeyboardInterrupt:
         print("\n[INFO] interrupted by user")
         return 130

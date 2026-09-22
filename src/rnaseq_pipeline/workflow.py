@@ -3,11 +3,12 @@
 Each stage follows START -> VALIDATION (inputs) -> EXECUTION -> POST-VALIDATION -> SUCCESS/FAILURE.
 A checkpoint is written only after post-validation succeeds.
 """
+import csv
 import json
 import os
 from pathlib import Path
 
-from . import (PipelineError, UserAbort, alignment, bam_manager, count_matrix, data_manager, design,
+from . import (PipelineError, Terminated, UserAbort, alignment, bam_manager, count_matrix, data_manager, design,
                ena_manager, fastq_validator, featurecounts, qc_manager, quality_assessment, r_bridge,
                reference_manager, runner, sra_manager, storage, strandedness, stringtie, trimming, ui)
 from . import config as C
@@ -149,7 +150,8 @@ class Stage:
     title = ""
     depends = ()
     expensive = False
-    settings = ()
+    settings = ()          # shown/editable on the stage screen
+    result_settings = ()   # settings whose change makes this stage's existing result stale
 
     def overview(self, ctx):
         return []
@@ -170,6 +172,7 @@ class Stage:
 class DataStage(Stage):
     key, title, expensive = "data_acquired", "DATA DOWNLOAD / IMPORT", True
     settings = ("download.source_preference", "download.max_reads", "import_mode")
+    result_settings = ("download.max_reads",)
 
     def overview(self, ctx):
         src = ctx.project.state.get("data_source")
@@ -253,6 +256,7 @@ class DataStage(Stage):
 class FastqVerifyStage(Stage):
     key, title, depends = "fastq_verified", "FASTQ VERIFICATION", ("data_acquired",)
     settings = ("fastq_validation.workers", "fastq_validation.quality_offset", "fastq_validation.allowed_bases")
+    result_settings = ("fastq_validation.quality_offset", "fastq_validation.allowed_bases")
 
     def overview(self, ctx):
         return [("Samples", len(ctx.samples)), ("Read type", ctx.project.state.get("read_type")),
@@ -353,6 +357,7 @@ def show_assessment(res):
 class QualityGateStage(Stage):
     key, title, depends = "quality_assessed", "QUALITY ASSESSMENT / QUALITY GATE", ("raw_qc_completed",)
     settings = ("trim_adapters", "quality_gate")
+    result_settings = ("trim_adapters", "quality_gate")
 
     def execute(self, ctx):
         if ctx.dry_run:
@@ -397,6 +402,7 @@ class TrimmingStage(Stage):
     key, title, depends, expensive = "trimming_completed", "CONDITIONAL TRIMMING (fastp) + POST-TRIM QC", \
         ("quality_assessed",), True
     settings = ("fastp_parameters",)
+    result_settings = ("fastp_parameters",)
 
     def overview(self, ctx):
         d = (ctx.project.state.get("qc_decision") or {}).get("decision")
@@ -454,6 +460,8 @@ class TrimmingStage(Stage):
 class ReferenceStage(Stage):
     key, title, expensive = "reference_ready", "REFERENCE PREPARATION", True
     settings = ("hisat2_build.use_splice_sites_in_index", "reference_store")
+    result_settings = ("hisat2_build", "featurecounts_parameters.feature_type",
+                       "featurecounts_parameters.attribute")
 
     def overview(self, ctx):
         r = ctx.project.state.get("reference") or {}
@@ -518,6 +526,7 @@ class ReferenceStage(Stage):
 class AlignmentStage(Stage):
     key, title, depends, expensive = "alignment_completed", "ALIGNMENT (HISAT2)", \
         ("trimming_completed", "reference_ready"), True
+    result_settings = ("hisat2_parameters", "min_overall_alignment_rate_fail")
     settings = ("hisat2_parameters", "samtools_sort_memory_per_thread", "min_overall_alignment_rate_fail",
                 "min_overall_alignment_rate_warn")
 
@@ -642,6 +651,7 @@ class BamQCStage(Stage):
 class StrandednessStage(Stage):
     key, title, depends = "strandedness_determined", "LIBRARY STRANDEDNESS", ("alignment_completed", "reference_ready")
     settings = ("strandedness", "strandedness_inference")
+    result_settings = ("strandedness", "strandedness_inference")
 
     def execute(self, ctx):
         p, cfg = ctx.project, ctx.cfg
@@ -711,6 +721,7 @@ class StringTieStage(Stage):
     key, title, depends, expensive = "stringtie_completed", "TRANSCRIPT QUANTIFICATION (StringTie2)", \
         ("strandedness_determined", "alignment_completed", "reference_ready"), True
     settings = ("stringtie_parameters",)
+    result_settings = ("stringtie_parameters",)
 
     def overview(self, ctx):
         return [("Mode", "reference-guided (-e): annotated transcripts only"),
@@ -750,6 +761,7 @@ class FeatureCountsStage(Stage):
     key, title, depends = "featurecounts_completed", "GENE COUNTING (featureCounts)", \
         ("strandedness_determined", "alignment_completed", "reference_ready")
     settings = ("featurecounts_parameters",)
+    result_settings = ("featurecounts_parameters",)
 
     def overview(self, ctx):
         fc = ctx.cfg["featurecounts_parameters"]
@@ -774,6 +786,18 @@ class FeatureCountsStage(Stage):
         if exp and len(genes) != exp:
             raise PipelineError(f"featureCounts reported {len(genes)} genes but the GTF has {exp}", stage=self.key)
         stats = featurecounts.parse_summary(summ, bams, ctx.samples)
+        fragments = {s: (p.samples[s]["trimmed"]["expected_reads_per_file"] if p.samples[s].get("trimmed")
+                         else (p.samples[s].get("reads") or {}).get("R1")) for s in ctx.samples}
+        aln_file = p.path("alignment", "reports", "alignment_summary.tsv")
+        aln_rows = {r["sample"]: r for r in csv.DictReader(open(aln_file), delimiter="\t")} if aln_file.exists() else {}
+        errors, warns = featurecounts.reconcile(stats, fragments, aln_rows)
+        for w in warns:
+            ui.warn(w)
+        if errors:
+            raise PipelineError("featureCounts totals are inconsistent with the alignments:\n  - "
+                                + "\n  - ".join(errors), stage=self.key,
+                                remedy="re-run alignment and gene counting; if it persists, report it with the logs")
+        ui.ok("featureCounts totals reconcile with the BAM files (independent check)")
         ui.table([(s, f"{v['assigned']:,}", f"{v['assigned_pct']}%") for s, v in stats.items()],
                  ["Sample", "Assigned", "Assigned %"])
         low = [s for s, v in stats.items() if v["assigned_pct"] < featurecounts.LOW_ASSIGNED_WARN]
@@ -798,6 +822,12 @@ class CountMatrixStage(Stage):
         genes, counts = featurecounts.parse(p.path("featurecounts", "featurecounts.txt"), bams)
         b2s = {str(b): s for b, s in zip(bams, ctx.samples)}
         matrix = count_matrix.build(genes, counts, b2s, ctx.samples)
+        fc_stats = json.loads(p.path("featurecounts", "featurecounts_stats.json").read_text())
+        mismatch = count_matrix.check_against_assigned(matrix, {s: fc_stats[s]["assigned"] for s in ctx.samples})
+        if mismatch:
+            raise PipelineError("count matrix does not add up to featureCounts' assigned reads:\n  - "
+                                + "\n  - ".join(mismatch), stage=self.key,
+                                remedy="re-run gene counting; the featureCounts output may have been modified")
         groups = {}
         for sid in ctx.samples:
             groups.setdefault(p.samples[sid].get("bio_unit") or sid, []).append(sid)
@@ -819,6 +849,15 @@ class CountMatrixStage(Stage):
         tsv, csvp = count_matrix.write(genes, matrix, p.path("counts", "gene_count_matrix.tsv"),
                                        p.path("counts", "gene_count_matrix.csv"))
         info = count_matrix.validate_file(tsv, expected_samples=list(matrix), expected_genes=len(genes))
+        expected_units = {u: sum(fc_stats[r]["assigned"] for r in runs) for u, runs in
+                          ({count_matrix_safe(u): r for u, r in groups.items()} if collapsed
+                           else {s: [s] for s in ctx.samples}).items()}
+        written = count_matrix.check_against_assigned({s: [info["library_sizes"][s]] for s in info["samples"]},
+                                                      expected_units)
+        if written:
+            raise PipelineError("written count matrix does not match featureCounts: " + "; ".join(written),
+                                stage=self.key)
+        ui.ok("count matrix column sums equal featureCounts assigned reads for every sample (independent check)")
         units = list(matrix)
         p.state["count_units"] = units
         p.state["count_unit_runs"] = {count_matrix_safe(u): r for u, r in groups.items()} if collapsed \
@@ -876,6 +915,9 @@ class DesignStage(Stage):
 class DESeq2Stage(Stage):
     key, title, depends, expensive = "deseq2_completed", "R / DESeq2 DIFFERENTIAL EXPRESSION", \
         ("design_confirmed", "count_matrix_completed"), True
+    result_settings = ("alpha", "log2fc_threshold", "lfc_test_threshold", "min_count_filter", "lfc_shrinkage",
+                       "transformation", "top_n_genes", "heatmap_max_genes", "independent_filtering",
+                       "cooks_cutoff", "plot_formats", "plot_dpi", "annotation")
     settings = ("alpha", "log2fc_threshold", "lfc_test_threshold", "min_count_filter", "lfc_shrinkage",
                 "transformation", "top_n_genes", "heatmap_max_genes", "independent_filtering", "cooks_cutoff")
 
@@ -946,8 +988,17 @@ class ReportStage(Stage):
             return [], {}, {}
         mfiles = manifest.write(ctx)
         rep = report_manager.generate(ctx)
+        problems = report_manager.validate(ctx, rep)
+        if problems:
+            raise PipelineError("the generated report failed validation:\n  - " + "\n  - ".join(problems),
+                                stage=self.key, remedy="re-run the report step; if it persists, report it with logs")
+        ui.ok("report validated: every link resolves and every number matches the result files")
         ui.ok(f"final report: {rep}")
         return [rep] + mfiles, {}, {}
+
+    def revalidate(self, ctx, data):
+        from . import report_manager
+        return report_manager.validate(ctx)
 
 
 STAGES = [DataStage(), FastqVerifyStage(), RawQCStage(), QualityGateStage(), TrimmingStage(), ReferenceStage(),
@@ -957,6 +1008,29 @@ BY_KEY = {s.key: s for s in STAGES}
 
 
 # ============================================================================ status / resume
+
+def settings_snapshot(cfg, stage):
+    return {k: C.get(cfg, k) for k in stage.result_settings}
+
+
+def settings_changes(ctx, stage, data):
+    """Human-readable list of result-relevant settings that differ from those the checkpoint was made with."""
+    recorded = (data.get("params") or {}).get("settings")
+    if recorded is None:  # checkpoint written by a version that did not record settings
+        return []
+    now = settings_snapshot(ctx.cfg, stage)
+    changes = []
+    for k in sorted(set(recorded) | set(now)):
+        if json.dumps(recorded.get(k), sort_keys=True, default=str) != json.dumps(now.get(k), sort_keys=True,
+                                                                                  default=str):
+            changes.append(f"setting '{k}' changed ({_short(recorded.get(k))} -> {_short(now.get(k))})")
+    return changes
+
+
+def _short(v):
+    s = json.dumps(v, default=str)
+    return s if len(s) <= 40 else s[:37] + "..."
+
 
 def stage_status(ctx, stage, deep=False, memo=None):
     """VALID / INVALID(reason) / PENDING. A stage is VALID only if all upstream stages are VALID too."""
@@ -972,7 +1046,7 @@ def stage_status(ctx, stage, deep=False, memo=None):
         if s != "VALID":
             memo[stage.key] = ("INVALID", f"upstream stage '{dep}' is {s}")
             return memo[stage.key]
-    probs = ctx.cp.verify_files(stage.key, deep=deep)
+    probs = settings_changes(ctx, stage, data) + ctx.cp.verify_files(stage.key, deep=deep)
     cleaned = set(ctx.project.state.get("cleaned_files", []))
     probs = [x for x in probs if not any(x.endswith(c) for c in cleaned)]
     rec_samples = set((data.get("params") or {}).get("samples") or [])
@@ -984,8 +1058,9 @@ def stage_status(ctx, stage, deep=False, memo=None):
     if not probs:
         try:
             probs = stage.revalidate(ctx, data)
-        except Exception as e:  # revalidation must never crash the resume screen
-            probs = [f"revalidation error: {e}"]
+        except Exception as e:  # fail-safe: an unexpected error marks the stage INVALID (re-run), never VALID
+            ui.log.debug("revalidation of %s raised", stage.key, exc_info=True)
+            probs = [f"could not re-check outputs ({type(e).__name__}: {e}); the stage will be re-run"]
     memo[stage.key] = ("VALID", None) if not probs else ("INVALID", "; ".join(probs[:3]))
     return memo[stage.key]
 
@@ -1069,11 +1144,11 @@ def change_settings(ctx, stage):
     key = keys[i]
     old = C.get(ctx.cfg, key)
     raw = ui.ask(f"New value for {key}", default=json.dumps(old, default=str))
+    import yaml
     try:
-        import yaml
         new = yaml.safe_load(raw)
-    except Exception:
-        new = raw
+    except yaml.YAMLError:
+        new = raw  # not YAML syntax: treat as a plain string; validation below decides if it is acceptable
     trial = json.loads(json.dumps(ctx.cfg, default=str))
     C.set_value(trial, key, new)
     errs = C.validate(trial, ctx.sysinfo["cpu_cores"])
@@ -1118,6 +1193,8 @@ def run_stage(ctx, idx, stage):
     if ctx.dry_run:
         ui.status("DRY-RUN", f"{stage.title}: no outputs written, no checkpoint")
         return
+    params = dict(params or {})
+    params["settings"] = settings_snapshot(ctx.cfg, stage)
     ctx.cp.write(stage.key, outputs, params=params, depends_on=stage.depends, summary=summary)
     ctx.project.log_event(f"stage {stage.key} completed")
     ui.ok(f"STEP {idx}: {stage.title} — SUCCESS (checkpoint written)")
@@ -1141,11 +1218,14 @@ def run_pipeline(ctx, from_stage=None, only=None):
                 return False
         try:
             run_stage(ctx, i, st)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as e:
             print()
-            ui.warn(f"interrupted during {st.title}; partial outputs are kept as *.partial and will not be "
-                    "used. Resume the project to continue.")
-            ctx.project.log_event(f"stage {st.key} interrupted")
+            how = f"stopped by {e.signame}" if isinstance(e, Terminated) else "interrupted"
+            ui.warn(f"{how} during {st.title}; running tools were stopped and partial outputs (*.partial) will "
+                    "not be used. Resume the project to continue.")
+            ctx.project.log_event(f"stage {st.key} {how}")
+            if isinstance(e, Terminated):
+                raise
             return False
         except UserAbort as e:
             ui.info(f"stopped: {e}")

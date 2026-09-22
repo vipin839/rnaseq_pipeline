@@ -86,6 +86,34 @@ def parse(txt_path, bams):
     return genes, counts
 
 
+def reconcile(stats, input_fragments, alignment_rows):
+    """Independent check of featureCounts against the BAM/FASTQ it was given.
+
+    stats: parse_summary() output; input_fragments: {sample: reads (SE) or read pairs (PE)} from FASTQ
+    validation; alignment_rows: {sample: alignment_summary row}. Returns (errors, warnings).
+    Invariants (measured on real and synthetic data, see docs/VERIFICATION_MATRIX.md):
+      * featureCounts sees every fragment in the BAM: total >= input fragments
+      * it cannot assign more fragments than exist: assigned <= input fragments
+      * the only surplus comes from secondary/supplementary alignments (warning otherwise)
+    """
+    errors, warns = [], []
+    for sid, st in stats.items():
+        n = input_fragments.get(sid)
+        if not n:
+            continue
+        if st["total"] < n:
+            errors.append(f"{sid}: featureCounts processed {st['total']:,} fragments but the BAM holds {n:,} — "
+                          "it did not read the whole BAM")
+        if st["assigned"] > n:
+            errors.append(f"{sid}: {st['assigned']:,} fragments assigned but only {n:,} exist")
+        row = alignment_rows.get(sid) or {}
+        extra = int(row.get("secondary") or 0) + int(row.get("supplementary") or 0)
+        if row and st["total"] > n + extra:
+            warns.append(f"{sid}: featureCounts total {st['total']:,} exceeds fragments + secondary/supplementary "
+                         f"alignments ({n + extra:,})")
+    return errors, warns
+
+
 def parse_summary(sum_path, bams, samples):
     rows = {}
     with open(sum_path) as f:

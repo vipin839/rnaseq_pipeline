@@ -28,6 +28,7 @@ pytestmark = pytest.mark.skipif(
     reason="bioinformatics tools / R env not installed")
 
 LAUNCHER = ROOT / "rnaseq_pipeline"
+FAKE_KEY = "fakeNCBIkey0123456789abcdef"  # must never appear in any project file
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +62,8 @@ def new_project_answers(name, parent, fastq_dir, fasta, gtf):
 def project(synth, tmp_path_factory):
     work = tmp_path_factory.mktemp("work")
     cfg = work / "override.yaml"
-    cfg.write_text(f"reference_store: {work / 'refstore'}\n")
+    cfg.write_text(f"reference_store: {work / 'refstore'}\n"
+                   f"ncbi:\n  email: \"e2e@example.org\"\n  api_key: \"{FAKE_KEY}\"\n")
     r = run_cli(["--config", str(cfg), "--projects-dir", str(work / "projects")],
                 new_project_answers("E2E", work / "projects", synth / "fastq", synth / "genome.fa",
                                     synth / "annotation.gtf"))
@@ -201,3 +203,126 @@ def test_corrupted_fastq_stops_pipeline(synth, tmp_path):
     st = json.loads((p / "project.json").read_text())
     assert st["samples"]["Treat2"]["status"] == "FAILED"
     assert not list((p / "alignment" / "bam").glob("*.bam"))
+
+
+def test_no_credentials_anywhere_in_project(project):
+    """F0 regression: the API key/email given via --config must not be written to any project file."""
+    p, out, _ = project
+    assert FAKE_KEY not in out
+    for f in p.rglob("*"):
+        if f.is_file() and not f.is_symlink() and f.stat().st_size < 50_000_000:
+            data = f.read_bytes()
+            assert FAKE_KEY.encode() not in data, f"API key leaked into {f.relative_to(p)}"
+            assert b"e2e@example.org" not in data, f"email leaked into {f.relative_to(p)}"
+
+
+# ---------------------------------------------------------------- resume / invalidation matrix
+def _status_after(project_dir, tmp_path, mutate):
+    """Copy the finished project, apply `mutate(copy)`, return {stage_key: status} as resume would see it."""
+    from rnaseq_pipeline import environment_manager as EM, system_check as SC, workflow
+    from rnaseq_pipeline.project import Project
+    dst = tmp_path / "copy"
+    shutil.copytree(project_dir, dst, symlinks=True)
+    (dst / ".lock").unlink(missing_ok=True)
+    p = Project.open(dst)
+    mutate(p)
+    p = Project.open(dst)
+    cfg = p.config()
+    envs = EM.Environments(cfg)
+    envs.activate()
+    ctx = workflow.Context(p, cfg, envs, SC.collect(p.root))
+    memo = {}
+    return {st.key: workflow.stage_status(ctx, st, memo=memo)[0] for st in workflow.STAGES}, memo
+
+
+def _set(p, key, value):
+    from rnaseq_pipeline import config as C
+    cfg = C.load_yaml(p.config_path)
+    C.set_value(cfg, key, value)
+    C.save_yaml(cfg, p.config_path)
+
+
+STAGE_ORDER = ["data_acquired", "fastq_verified", "raw_qc_completed", "quality_assessed", "trimming_completed",
+               "reference_ready", "alignment_completed", "bam_qc_completed", "strandedness_determined",
+               "stringtie_completed", "featurecounts_completed", "count_matrix_completed", "design_confirmed",
+               "deseq2_completed", "report_generated"]
+
+
+@pytest.mark.parametrize("name,mutate,first_invalid", [
+    ("unchanged", lambda p: None, None),
+    ("alpha changed", lambda p: _set(p, "alpha", 0.01), "deseq2_completed"),
+    ("log2FC threshold changed", lambda p: _set(p, "log2fc_threshold", 2), "deseq2_completed"),
+    ("featureCounts MAPQ changed", lambda p: _set(p, "featurecounts_parameters.min_mapping_quality", 10),
+     "featurecounts_completed"),
+    ("fastp min length changed", lambda p: _set(p, "fastp_parameters.length_required", 50), "trimming_completed"),
+    ("hisat2 option changed", lambda p: _set(p, "hisat2_parameters.no_mixed", True), "alignment_completed"),
+    ("non-result setting changed", lambda p: _set(p, "threads", 2), None),
+    ("BAM truncated", lambda p: (lambda f: f.write_bytes(f.read_bytes()[:-100]))(
+        p.path("alignment", "bam", "Ctrl1.sorted.bam")), "alignment_completed"),
+    ("BAM index deleted", lambda p: p.path("alignment", "bam", "Ctrl1.sorted.bam.bai").unlink(),
+     "alignment_completed"),
+    ("count matrix edited", lambda p: (lambda f: f.write_text(f.read_text().replace("\t", "\t1", 1)))(
+        p.path("counts", "gene_count_matrix.tsv")), "count_matrix_completed"),
+    ("metadata edited after confirmation", lambda p: (lambda f: f.write_text(f.read_text() + "\n"))(
+        p.path("counts", "sample_metadata.tsv")), "design_confirmed"),
+    ("result table edited", lambda p: (lambda f: f.write_text(f.read_text() + "FAKE\t1\t5\t0\t1\t0\t0\tup\n"))(
+        next(p.path("results", "deseq2").glob("*/upregulated.tsv"))), "deseq2_completed"),
+    ("report deleted", lambda p: p.path("reports", "final_pipeline_report.html").unlink(), "report_generated"),
+])
+def test_resume_invalidation_matrix(project, tmp_path, name, mutate, first_invalid):
+    p, _, _ = project
+    status, memo = _status_after(p, tmp_path, mutate)
+    invalid = [k for k in STAGE_ORDER if status[k] != "VALID"]
+    if first_invalid is None:
+        assert not invalid, f"{name}: unexpectedly invalid {invalid}"
+        return
+    assert invalid, f"{name}: nothing was invalidated"
+    assert invalid[0] == first_invalid, f"{name}: first invalid stage {invalid[0]}, expected {first_invalid}"
+    # cascade: the stages that consume this stage's output must be invalid too
+    must_cascade = {"deseq2_completed": ["report_generated"],
+                    "featurecounts_completed": ["count_matrix_completed", "design_confirmed", "deseq2_completed",
+                                                "report_generated"],
+                    "trimming_completed": ["alignment_completed", "featurecounts_completed", "deseq2_completed",
+                                           "report_generated"],
+                    "alignment_completed": ["featurecounts_completed", "count_matrix_completed", "deseq2_completed",
+                                            "report_generated"],
+                    "count_matrix_completed": ["design_confirmed", "deseq2_completed", "report_generated"],
+                    "design_confirmed": ["deseq2_completed", "report_generated"]}.get(first_invalid, [])
+    not_cascaded = [k for k in must_cascade if status[k] == "VALID"]
+    assert not not_cascaded, f"{name}: downstream stages still VALID: {not_cascaded}"
+    if name.endswith("changed"):  # a settings change must be reported as such, naming the setting
+        assert "setting" in (memo[first_invalid][1] or ""), memo[first_invalid][1]
+
+
+# ---------------------------------------------------------------- F8: report validated independently
+def _ctx(project_dir):
+    from rnaseq_pipeline import environment_manager as EM, system_check as SC, workflow
+    from rnaseq_pipeline.project import Project
+    p = Project.open(project_dir)
+    cfg = p.config()
+    envs = EM.Environments(cfg)
+    envs.activate()
+    return workflow.Context(p, cfg, envs, SC.collect(p.root))
+
+
+def test_report_validates_against_result_files(project):
+    from rnaseq_pipeline import report_manager
+    p, _, _ = project
+    assert report_manager.validate(_ctx(p)) == []
+
+
+@pytest.mark.parametrize("tamper,expect", [
+    (lambda t: t.replace("data-check='up:condition_Treatment_vs_Control'>", "data-check='up:condition_Treatment_vs_Control'>9", 1),
+     "report shows up:"),
+    (lambda t: t.replace("pca.png", "pca_missing.png", 1), "broken link"),
+    (lambda t: t.replace("</html>", ""), "truncated"),
+])
+def test_report_tampering_detected(project, tmp_path, tamper, expect):
+    from rnaseq_pipeline import report_manager
+    p, _, _ = project
+    dst = tmp_path / "copy"
+    shutil.copytree(p, dst, symlinks=True)
+    rep = dst / "reports" / "final_pipeline_report.html"
+    rep.write_text(tamper(rep.read_text()))
+    problems = report_manager.validate(_ctx(dst))
+    assert any(expect in x for x in problems), problems

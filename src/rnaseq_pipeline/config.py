@@ -163,8 +163,9 @@ def require_valid(cfg, cores=None):
 
 def snapshot(cfg, project_config_dir, extra=None):
     """Save the exact final configuration used for this run."""
+    from .secrets import redacted
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    data = copy.deepcopy(cfg)
+    data = redacted(cfg)
     if extra:
         data["_resolved"] = extra
     path = Path(project_config_dir) / f"config_used_{stamp}.yaml"

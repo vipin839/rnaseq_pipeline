@@ -4,6 +4,7 @@ import shutil
 import sys
 
 from . import UserAbort
+from .secrets import scrub
 
 log = logging.getLogger("rnaseq")
 
@@ -28,6 +29,7 @@ def status(tag, message):
     label = f"[{tag}]"
     if _use_color() and tag in _COLORS:
         label = f"{_COLORS[tag]}{label}{_RESET}"
+    message = scrub(str(message))
     print(f"{label} {message}", flush=True)
     log.log(_LEVELS.get(tag, logging.INFO), "[%s] %s", tag, message)
 
@@ -188,11 +190,11 @@ def explain_failure(err):
         pairs.append(("Stage", err.stage))
     if getattr(err, "sample", None):
         pairs.append(("Sample", err.sample))
-    pairs.append(("Problem", str(err)))
+    pairs.append(("Problem", scrub(str(err))))
     if getattr(err, "cause", None):
-        pairs.append(("Likely cause", err.cause))
+        pairs.append(("Likely cause", scrub(str(err.cause))))
     if getattr(err, "remedy", None):
-        pairs.append(("Recommended action", err.remedy))
+        pairs.append(("Recommended action", scrub(str(err.remedy))))
     kv(pairs)
     rule("!")
     log.error("FAILED stage=%s sample=%s problem=%s cause=%s remedy=%s",

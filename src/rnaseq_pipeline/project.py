@@ -9,6 +9,7 @@ from pathlib import Path
 from . import PipelineError, __version__
 from . import config as C
 from . import validators as V
+from .secrets import strip_user_settings
 
 # Overridden by config key `projects_dir` or --projects-dir; never inside the (possibly read-only) package.
 DEFAULT_PROJECTS_DIR = Path.home() / "rnaseq_projects"
@@ -57,7 +58,8 @@ class Project:
             "samples": {}, "read_type": None, "reference": None, "strandedness": None,
             "qc_decision": None, "design": None, "selected_samples": None, "history": [],
         }
-        C.save_yaml(base_config or C.load_yaml(C.DEFAULT_CONFIG), root / "config" / "project_config.yaml")
+        C.save_yaml(strip_user_settings(base_config or C.load_yaml(C.DEFAULT_CONFIG)),
+                    root / "config" / "project_config.yaml")
         p.save()
         return p
 
@@ -70,7 +72,19 @@ class Project:
             p.state = json.load(f)
         for d in LAYOUT:  # repair missing dirs silently (never deletes)
             (p.root / d).mkdir(parents=True, exist_ok=True)
+        p._remove_stored_credentials()
         return p
+
+    def _remove_stored_credentials(self):
+        """Older versions copied the NCBI API key/email into the project config; remove them."""
+        if not self.config_path.exists():
+            return False
+        raw = C.load_yaml(self.config_path)
+        clean = strip_user_settings(raw)
+        if clean != raw:
+            C.save_yaml(clean, self.config_path)
+            return True
+        return False
 
     @staticmethod
     def list_projects(parent=None):
@@ -120,7 +134,7 @@ class Project:
         return C.load(self.config_path)
 
     def save_config(self, cfg):
-        C.save_yaml(cfg, self.config_path)
+        C.save_yaml(strip_user_settings(cfg), self.config_path)
 
     def rel(self, p):
         p = Path(p)

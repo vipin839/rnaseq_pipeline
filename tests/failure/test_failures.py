@@ -1,5 +1,6 @@
 """Intentional-failure tests: the pipeline must stop, explain, log, and never accept broken outputs."""
 import json
+import os
 import subprocess
 import threading
 import time
@@ -120,3 +121,63 @@ def test_r_rejects_bad_design(tmp_path, case):
     rs = RSCRIPT
     with pytest.raises(PipelineError, match="R/DESeq2 step failed"):
         r_bridge.run(rs, pp, tmp_path / "r.log", validate_only=True)
+
+
+# ---------------------------------------------------------------- F2 regression: SIGTERM / SIGHUP
+_SIGNAL_CHILD = r"""
+import sys, time
+sys.path.insert(0, {src!r})
+from rnaseq_pipeline import install_signal_handlers, runner, logger, Terminated
+logger.attach_project({logs!r})
+install_signal_handlers()
+try:
+    runner.run_pipeline([["sleep", "300"], ["cat"]], stage="t", stdout_file={out!r})
+except Terminated as e:
+    print("TERMINATED", e.signame, flush=True)
+    sys.exit(143)
+"""
+
+
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_termination_signal_stops_child_processes(tmp_path, signame):
+    """Before the fix, SIGTERM killed the pipeline but left its tools running (they live in their own session)."""
+    import os
+    import signal
+    import sys
+    from conftest import ROOT
+    code = _SIGNAL_CHILD.format(src=str(ROOT / "src"), logs=str(tmp_path / "logs"), out=str(tmp_path / "o.txt"))
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    deadline = time.time() + 10
+    while time.time() < deadline and subprocess.run(["pgrep", "-f", "^sleep 300$"], capture_output=True).returncode:
+        time.sleep(0.1)
+    assert subprocess.run(["pgrep", "-f", "^sleep 300$"], capture_output=True).returncode == 0, "child never started"
+    proc.send_signal(getattr(signal, signame))
+    out, _ = proc.communicate(timeout=20)
+    assert proc.returncode == 143 and f"TERMINATED {signame}" in out
+    time.sleep(0.5)
+    assert subprocess.run(["pgrep", "-f", "^sleep 300$"], capture_output=True).returncode != 0, "orphaned child"
+    rec = (tmp_path / "logs" / "commands.jsonl").read_text()
+    assert '"interrupted"' in rec
+
+
+def test_fastq_validation_pool_stops_on_interrupt(tmp_path):
+    """Worker processes validating large files must be terminated at once, not after finishing the file."""
+    import gzip
+    import multiprocessing
+    import signal
+    import threading
+    from rnaseq_pipeline import fastq_validator as FV
+    block = "".join(f"@r{n}\n" + "ACGT" * 25 + "\n+\n" + "I" * 100 + "\n" for n in range(100_000))
+    jobs = []
+    for i in range(2):  # 2 x 2,000,000 reads: uninterrupted validation takes >10 s (measured), so 5 s proves
+        f = tmp_path / f"s{i}.fq.gz"  # the workers were terminated rather than allowed to finish
+        with gzip.open(f, "wt", compresslevel=1) as fh:
+            for _ in range(20):
+                fh.write(block)
+        jobs.append((f"s{i}", str(f), None, "ACGTNacgtn.", 33))
+    threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+    t0 = time.time()
+    with pytest.raises(KeyboardInterrupt):
+        FV.validate_many(jobs, workers=2)
+    assert time.time() - t0 < 5, "validation workers were not terminated promptly"
+    assert not multiprocessing.active_children()

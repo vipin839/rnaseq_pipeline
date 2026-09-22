@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.parse
 
-from . import PipelineError, __version__, net
+from . import PipelineError, __version__, net, secrets
 
 BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 TOOL = f"rnaseq-pipeline/{__version__}"
@@ -26,6 +26,7 @@ def configure(cfg):
     n = (cfg or {}).get("ncbi") or {}
     _state["email"] = (n.get("email") or "").strip()
     _state["api_key"] = (n.get("api_key") or "").strip()
+    secrets.register(_state["api_key"])
     _state["min_interval"] = 1 / 10 if _state["api_key"] else 1 / 3
 
 

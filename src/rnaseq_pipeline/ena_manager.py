@@ -69,6 +69,7 @@ def download_run(run, out_dir, *, max_reads=0, log_file=None, retries=3):
             out.append(_download_head(url, dest, max_reads, acc, log_file))
         else:
             out.append(net.download(url, dest, stage="data", sample=acc, expected_md5=md5 or None,
+                                    expected_bytes=size or None,
                                     log_file=log_file, retries=retries))
     return out[0], (out[1] if paired else None)
 

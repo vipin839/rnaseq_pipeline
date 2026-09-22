@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 
 from . import __version__, dependency_manager, ui
+from .secrets import redacted
 from . import config as C
 
 
@@ -48,7 +49,7 @@ def write(ctx):
         "strandedness": {k: v for k, v in (s.get("strandedness") or {}).items() if k != "evidence"},
         "qc_decision": s.get("qc_decision"), "design": s.get("design"),
         "threads": ctx.threads, "max_memory_gb": ctx.mem_gb,
-        "parameters": cfg,
+        "parameters": redacted(cfg),
         "deseq2_settings": {k: cfg.get(k) for k in ("alpha", "log2fc_threshold", "lfc_test_threshold",
                                                      "min_count_filter", "independent_filtering", "cooks_cutoff",
                                                      "lfc_shrinkage", "transformation", "design_formula")},

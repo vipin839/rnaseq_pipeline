@@ -8,7 +8,7 @@ and matching mate identifiers, read in lockstep.
 import os
 import shutil
 import subprocess
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 from pathlib import Path
 
 REPORT_COLUMNS = ["sample", "file", "mate", "status", "reads", "bases", "min_length", "max_length",
@@ -120,9 +120,9 @@ class _Reader:
         err = b""
         if self.proc:
             try:
-                self.stream.read()  # drain
-            except Exception:
-                pass
+                self.stream.read()  # drain so the decompressor can exit and report its status
+            except (OSError, ValueError, EOFError):
+                pass  # a broken stream is reported through the decompressor exit code below
             err = self.proc.stderr.read() if self.proc.stderr else b""
             rc = self.proc.wait()
         self.stream.close()
@@ -137,8 +137,8 @@ class _Reader:
                 self.proc.kill()
                 self.proc.wait()
             self.stream.close()
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            pass  # best-effort cleanup after a failure that is already being reported
 
     def stats(self):
         return {"reads": self.n, "bases": self.bases, "min_length": self.minlen or 0,
@@ -224,6 +224,10 @@ def _job(args):
     return validate_sample(*args)
 
 
+def _job_with_id(args):
+    return args[0], validate_sample(*args)
+
+
 def validate_many(jobs, workers=1, progress=None):
     """jobs: list of (sample, r1, r2, allowed, offset). Returns rows in job order."""
     results = {}
@@ -233,12 +237,20 @@ def validate_many(jobs, workers=1, progress=None):
             if progress:
                 progress(j[0], results[j[0]])
     else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(_job, j): j[0] for j in jobs}
-            for f in as_completed(futs):
-                results[futs[f]] = f.result()
+        # multiprocessing.Pool (not ProcessPoolExecutor) so an interrupt can terminate workers at once
+        # instead of waiting for each to finish reading a possibly very large file.
+        pool = multiprocessing.get_context("fork").Pool(processes=workers)
+        try:
+            for sid, rows in pool.imap_unordered(_job_with_id, jobs):
+                results[sid] = rows
                 if progress:
-                    progress(futs[f], results[futs[f]])
+                    progress(sid, rows)
+            pool.close()
+        except BaseException:
+            pool.terminate()
+            raise
+        finally:
+            pool.join()
     rows = []
     for j in jobs:
         rows.extend(results[j[0]])

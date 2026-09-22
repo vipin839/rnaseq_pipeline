@@ -5,6 +5,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from .secrets import ScrubFilter, scrub
+
 log = logging.getLogger("rnaseq")
 _lock = threading.Lock()
 _state = {"logs_dir": None, "handlers": []}
@@ -32,6 +34,7 @@ def attach_project(logs_dir):
     errs.setLevel(logging.WARNING)
     errs.setFormatter(logging.Formatter(FMT))
     for h in (main, errs):
+        h.addFilter(ScrubFilter())
         log.addHandler(h)
     _state["handlers"] = [main, errs]
     _state["logs_dir"] = logs_dir
@@ -54,7 +57,7 @@ def record_command(entry):
     d = _state["logs_dir"]
     if d is None:
         return
-    entry = dict(entry)
+    entry = {k: (scrub(v) if isinstance(v, str) else v) for k, v in dict(entry).items()}
     entry.setdefault("timestamp", datetime.now().isoformat(timespec="seconds"))
     with _lock:
         with open(d / "commands.jsonl", "a", encoding="utf-8") as f:

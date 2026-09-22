@@ -90,15 +90,8 @@ def validate_outputs(project, params):
             problems.append(f"{name}: full_results has {len(full)} rows, expected {c['genes_tested']}")
         if len(up) != c["up"] or len(down) != c["down"] or len(sig) != c["significant"]:
             problems.append(f"{name}: up/down/significant table sizes inconsistent with summary")
-        a, t = params["alpha"], params["log2fc_threshold"]
-        for r in up:
-            if not (float(r["padj"]) < a and float(r["log2FoldChange"]) >= t):
-                problems.append(f"{name}: upregulated gene {r['gene_id']} violates thresholds")
-                break
-        for r in down:
-            if not (float(r["padj"]) < a and float(r["log2FoldChange"]) <= -t):
-                problems.append(f"{name}: downregulated gene {r['gene_id']} violates thresholds")
-                break
+        problems += [f"{name}: {x}" for x in
+                     check_threshold_sets(full, up, down, sig, params["alpha"], params["log2fc_threshold"])]
         need = {"gene_id", "baseMean", "log2FoldChange", "lfcSE", "pvalue", "padj"}
         if full and not need <= set(full[0]):
             problems.append(f"{name}: results lack columns {need - set(full[0])}")
@@ -113,6 +106,45 @@ def validate_outputs(project, params):
     if problems:
         raise PipelineError("DESeq2 output validation failed:\n  - " + "\n  - ".join(problems), stage="deseq2")
     return summary
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None  # "NA" (e.g. padj removed by independent filtering)
+
+
+def check_threshold_sets(full, up, down, sig, alpha, t):
+    """Independently re-derive the up/down/significant gene sets from the full table and the configured
+    thresholds, and require the written tables to match them EXACTLY (nothing missing, nothing extra)."""
+    exp_up, exp_down = set(), set()
+    for r in full:
+        padj, lfc = _num(r.get("padj")), _num(r.get("log2FoldChange"))
+        if padj is None or lfc is None or not padj < alpha:
+            continue
+        if lfc >= t:
+            exp_up.add(r["gene_id"])
+        elif lfc <= -t:
+            exp_down.add(r["gene_id"])
+    problems = []
+    for label, expected, table in (("upregulated", exp_up, up), ("downregulated", exp_down, down),
+                                   ("significant", exp_up | exp_down, sig)):
+        got = [r["gene_id"] for r in table]
+        if len(got) != len(set(got)):
+            problems.append(f"{label} table lists a gene more than once")
+        missing, extra = expected - set(got), set(got) - expected
+        if missing:
+            problems.append(f"{len(missing)} gene(s) meet the {label} criteria but are missing from the table "
+                            f"(e.g. {sorted(missing)[:3]})")
+        if extra:
+            problems.append(f"{len(extra)} gene(s) in the {label} table do not meet padj < {alpha} and "
+                            f"|log2FC| >= {t} (e.g. {sorted(extra)[:3]})")
+    labels = {r["gene_id"]: r.get("regulation") for r in full}
+    wrong = [g for g in exp_up if labels.get(g) != "up"] + [g for g in exp_down if labels.get(g) != "down"]
+    if wrong:
+        problems.append(f"'regulation' column disagrees with the thresholds for {len(wrong)} gene(s)")
+    return problems
 
 
 def _rows(path):

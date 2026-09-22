@@ -21,6 +21,18 @@ def build(genes, counts_by_bam, bam_to_sample, samples):
     return {s: matrix[s] for s in samples}
 
 
+def check_against_assigned(matrix, assigned):
+    """Column sums must equal featureCounts' Assigned per sample. Returns a list of mismatches."""
+    out = []
+    for sid, vals in matrix.items():
+        total = sum(vals)
+        if sid not in assigned:
+            out.append(f"{sid}: no featureCounts summary")
+        elif total != assigned[sid]:
+            out.append(f"{sid}: column sum {total:,} != featureCounts Assigned {assigned[sid]:,}")
+    return out
+
+
 def collapse(genes, matrix, groups):
     """Sum technical replicates. groups: {bio_unit: [run ids]}. Returns new matrix keyed by bio_unit."""
     out = {}
