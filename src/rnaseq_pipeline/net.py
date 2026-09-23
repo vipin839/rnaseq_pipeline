@@ -56,10 +56,18 @@ CURL_ERRORS = {
 }
 
 
-def download(url, dest, *, stage, sample=None, expected_md5=None, expected_bytes=None, log_file=None, retries=3):
+STALL_TIMEOUT_S = 60      # a transfer below 1 kB/s for this long is treated as a dead connection
+MAX_ATTEMPTS = 200        # absolute cap, even while every attempt makes progress
+
+
+def download(url, dest, *, stage, sample=None, expected_md5=None, expected_bytes=None, log_file=None, retries=3,
+             stall_timeout=STALL_TIMEOUT_S):
     """Download url to dest safely.
 
     * data go to dest.part; an interrupted transfer is resumed (or restarted if the server cannot resume)
+    * a stalled connection (< 1 kB/s for `stall_timeout` s) is aborted and resumed, never waited on forever
+    * an attempt that added data does not use up the retry budget: only `retries` attempts in a row WITHOUT
+      progress give up, so a flaky connection that keeps delivering data still finishes
     * the result must be non-empty, have the expected size (if known) and MD5 (if known)
     * only then is it renamed to dest; an existing dest is re-verified and never overwritten
     """
@@ -73,27 +81,37 @@ def download(url, dest, *, stage, sample=None, expected_md5=None, expected_bytes
         return dest
     part = dest.with_name(dest.name + ".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    resume = True
-    for attempt in range(1, retries + 1):
+    resume, no_progress, attempt = True, 0, 0
+    while True:
+        attempt += 1
+        before = part.stat().st_size if part.exists() else 0
         cmd = ["curl", "-fL", "--retry", str(retries), "--retry-delay", "5", "--connect-timeout", "30",
+               "--speed-limit", "1024", "--speed-time", str(int(stall_timeout)),
                *(["-C", "-"] if resume else []), "-o", str(part), url]
         res = runner.run(cmd, stage=stage, sample=sample, log_file=log_file, check=False,
                          description=f"Downloading {dest.name}" + (f" (attempt {attempt})" if attempt > 1 else ""))
         if res.returncode == 0:
             break
         why, transient = CURL_ERRORS.get(res.returncode, (f"curl exit code {res.returncode}", True))
+        if res.returncode == 28:
+            why = f"no data arrived for {int(stall_timeout)} s (stalled connection)"
         if res.returncode == 33 or (part.exists() and res.returncode == 22 and part.stat().st_size and resume):
             resume = False  # server cannot resume (or the partial file is stale): start this file again cleanly
             part.unlink(missing_ok=True)
             ui.warn(f"{dest.name}: {why}; restarting the download from the beginning")
             continue
-        if not transient or attempt == retries:
+        progressed = (part.stat().st_size if part.exists() else 0) > before
+        no_progress = 0 if progressed else no_progress + 1
+        if not transient or no_progress >= retries or attempt >= MAX_ATTEMPTS:
             raise PipelineError(f"download of {dest.name} failed: {why}", stage=stage, sample=sample,
                                 cause=f"URL: {scrub(url)}" + (f"\n  Log: {log_file}" if log_file else ""),
                                 remedy="check the internet connection and that the data are public, then resume "
                                        "(completed parts are kept)" if transient else
                                        "the file cannot be fetched from this address; check the accession/URL")
-        ui.warn(f"{dest.name}: {why}; retrying ({attempt}/{retries}), keeping what was already downloaded")
+        done = part.stat().st_size if part.exists() else 0
+        ui.warn(f"{dest.name}: {why}; resuming ({done / 1e6:.0f} MB kept"
+                + (f", {expected_bytes / 1e6:.0f} MB total" if expected_bytes else "")
+                + ("" if progressed else f"; no progress {no_progress}/{retries}") + ")")
     if runner.DRY_RUN:
         return dest
     problem = _verify(part, expected_md5, expected_bytes)

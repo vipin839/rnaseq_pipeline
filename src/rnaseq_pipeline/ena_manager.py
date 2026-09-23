@@ -93,7 +93,8 @@ def _download_head(url, dest, n_reads, acc, log_file, attempts=3):
     last_problem = "unknown"
     for attempt in range(1, attempts + 1):
         lines, finished_early = 0, False
-        p = subprocess.Popen(["curl", "-sSfL", "--retry", "3", "--connect-timeout", "30", url],
+        p = subprocess.Popen(["curl", "-sSfL", "--retry", "3", "--connect-timeout", "30", "--speed-limit", "1024",
+                              "--speed-time", str(int(net.STALL_TIMEOUT_S)), url],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=runner.child_env())
         try:
             with gzip.GzipFile(fileobj=p.stdout) as src, gzip.open(part, "wb", compresslevel=4) as dst:

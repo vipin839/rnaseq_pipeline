@@ -19,7 +19,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    stalls_left = 0          # /stall.bin: send part of the file, then stop sending (a dead connection)
+    stall_seconds = 120      # far longer than the abort + resume path (~13 s), so timing cannot be ambiguous
+
     def do_GET(self):
+        if self.path in ("/stall.bin", "/flaky.bin", "/dead.bin"):
+            return self._partial()
         body = {"/data.bin": DATA, "/empty.bin": b""}.get(self.path)
         if body is None:
             self.send_error(404)
@@ -35,6 +40,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Length", str(len(chunk)))
         self.end_headers()
+        self.wfile.write(chunk)
+
+
+    def _partial(self):
+        import time
+        rng = self.headers.get("Range")
+        start = int(rng.split("=")[1].split("-")[0]) if rng else 0
+        if self.path == "/dead.bin":            # the connection breaks before any data arrives, every time
+            self.connection.close()
+            return
+        chunk = DATA[start:]
+        self.send_response(206 if start else 200)
+        if start:
+            self.send_header("Content-Range", f"bytes {start}-{len(DATA) - 1}/{len(DATA)}")
+        self.send_header("Content-Length", str(len(chunk)))
+        self.end_headers()
+        if self.path == "/stall.bin" and Handler.stalls_left > 0:
+            Handler.stalls_left -= 1
+            self.wfile.write(chunk[:300_000])
+            self.wfile.flush()
+            time.sleep(Handler.stall_seconds)    # nothing more arrives; the socket stays open
+            return
+        if self.path == "/flaky.bin":           # each connection delivers 300 kB, then drops (progress each time)
+            self.wfile.write(chunk[:300_000])
+            return
         self.wfile.write(chunk)
 
 
@@ -233,3 +263,30 @@ def test_ena_failure_falls_back_to_sra_without_mixing_mates(tmp_path, monkeypatc
     assert (fq / "SRR0000002_1.fastq.gz").read_bytes() == b"from SRA"
     assert (fq / "SRR0000002_2.fastq.gz").read_bytes() == b"from SRA"
     assert (fq / "SRR0000002_1.fastq.gz.other_archive").read_bytes() == b"from ENA"
+
+
+# ---------------------------------------------------------------- P2 finding H11: stalled / flaky connections
+def test_stalled_transfer_is_aborted_and_resumed(server, tmp_path):
+    """Observed in the real-data run: the connection stopped delivering data and curl waited indefinitely."""
+    import time
+    Handler.stalls_left = 1
+    t0 = time.time()
+    out = net.download(f"{server}/stall.bin", tmp_path / "s.bin", stage="t", log_file=tmp_path / "dl.log",
+                       retries=2, expected_md5=MD5, stall_timeout=2)
+    assert out.read_bytes() == DATA
+    # aborting (2 s) + curl's retry delay (5 s) + the rest takes ~13 s; waiting out the stall would take >= 120 s
+    assert time.time() - t0 < 60, "the stalled transfer was not aborted"
+
+
+def test_drops_with_progress_do_not_exhaust_retries(server, tmp_path):
+    """A flaky connection that keeps delivering data must finish, however many times it drops."""
+    out = net.download(f"{server}/flaky.bin", tmp_path / "f.bin", stage="t", log_file=tmp_path / "dl.log",
+                       retries=2, expected_md5=MD5, stall_timeout=5)
+    assert out.read_bytes() == DATA          # 2 MB in 300 kB pieces: ~7 connections with retries=2
+
+
+def test_no_progress_still_gives_up(server, tmp_path):
+    with pytest.raises(PipelineError) as e:
+        net.download(f"{server}/dead.bin", tmp_path / "d.bin", stage="t", log_file=tmp_path / "dl.log",
+                     retries=2, stall_timeout=2)
+    assert "no data arrived" in str(e.value) or "failed" in str(e.value)

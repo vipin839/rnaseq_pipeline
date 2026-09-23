@@ -45,6 +45,7 @@ Every failure screen shows the **Stage**, **Problem**, **Likely cause**, **Recom
 | `experimental design is not confirmed (or metadata changed since confirmation)` | `sample_metadata.tsv` was edited after confirmation | Project menu → Experimental design → confirm again |
 | `this project is already open in another pipeline process` | Two sessions on one project | Close the other session. The lock is released automatically when it exits |
 | Stage shows `INVALID` after resume | An output was modified, moved or deleted, or an upstream stage re-ran | Continue the pipeline and that stage will re-run |
+| `no data arrived for 60 s (stalled connection); resuming` | The connection went silent (common on Wi-Fi and with busy archive servers) | Nothing to do: the transfer resumes from where it stopped. Only attempts that add no data count as failures |
 | Download keeps failing | Network problem or server outage | Resume later. Downloads continue from where they stopped (`.part` files) |
 
 ## Getting more detail

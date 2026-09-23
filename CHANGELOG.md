@@ -87,6 +87,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **Stalled downloads no longer hang, and a flaky connection that keeps delivering data finishes.** Found in the
+  real-data acceptance run: an ENA connection stopped delivering data and `curl` waited indefinitely (no stall
+  timeout); separately, every dropped connection used one of 3 retries even when data kept arriving, so a large file
+  on a flaky network could fail. Now a transfer below 1 kB/s for 60 s is aborted and resumed (also for pilot
+  streaming), and only attempts that add no data count against the retry budget (absolute cap 200 attempts).
 * **No orphaned processes from quick commands.** Version probes and checks such as `samtools flagstat` ran without
   the process-group handling of pipeline commands; on Ctrl-C/SIGTERM Python stopped only the direct child, so the
   real program behind a wrapper script (hisat2, hisat2-build, fastqc) kept running. They now run in their own
@@ -139,7 +144,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 262 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 265 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).
