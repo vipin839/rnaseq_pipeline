@@ -227,16 +227,23 @@ def describe_exit(code):
 def tool_run(cmd, timeout=60):
     """Like tool_output, but returns (exit code, output); (None, None) if the program cannot be started."""
     try:
-        r = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout, env=child_env())
-        return r.returncode, (r.stdout + r.stderr).decode(errors="replace")
-    except (OSError, subprocess.TimeoutExpired):
+        p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             stdin=subprocess.DEVNULL, env=child_env(), start_new_session=True)
+    except OSError:
         return None, None
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate([p])
+        return None, None
+    except BaseException:
+        # Ctrl-C / SIGTERM: many tools are wrapper scripts (hisat2, fastqc) whose real program is a grandchild,
+        # so the whole process group is stopped, as for pipeline commands
+        _terminate([p])
+        raise
+    return p.returncode, (out + err).decode(errors="replace")
 
 
 def tool_output(cmd, timeout=60):
     """Run a quick informational command (e.g. --version); returns combined output or None."""
-    try:
-        r = subprocess.run([str(c) for c in cmd], capture_output=True, timeout=timeout, env=child_env())
-        return (r.stdout + r.stderr).decode(errors="replace")
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    return tool_run(cmd, timeout)[1]

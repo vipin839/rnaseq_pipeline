@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from . import (PipelineError, Terminated, UserAbort, alignment, bam_manager, count_matrix, data_manager, design,
+from . import (PipelineError, Terminated, UserAbort, alignment, bam_manager, count_matrix, data_manager, dependency_manager, design,
                ena_manager, fastq_validator, featurecounts, qc_manager, quality_assessment, r_bridge,
                reference_manager, runner, sra_manager, storage, strandedness, stringtie, trimming, ui)
 from . import config as C
@@ -1300,6 +1300,13 @@ def run_stage(ctx, idx, stage):
                             cause="the scientific tools environment is missing or incomplete",
                             remedy="run 'rnaseq-pipeline --check' for details, then main menu 4 "
                                    "(Manage Dependencies) to install them")
+    unusable = dependency_manager.unusable(stage.required_tools(ctx))
+    if unusable:
+        raise PipelineError("installed software cannot be used for this step: " + "; ".join(unusable),
+                            stage=stage.key, cause="an outdated or incompatible build is installed; results from it "
+                                                   "would not match the tested pipeline",
+                            remedy="run 'rnaseq-pipeline --check' for the exact fix, or main menu 4 "
+                                   "(Manage Dependencies); nothing was run")
     if not ctx.dry_run:
         retry = [s for s, r in ctx.project.samples.items()
                  if r.get("status") == "FAILED" and r.get("failed_stage") == stage.key]
@@ -1318,7 +1325,15 @@ def run_stage(ctx, idx, stage):
     if est >= 1 and not ctx.dry_run:
         if not storage.preflight(ctx.project.root, est, ctx.cfg):
             raise UserAbort("insufficient/borderline storage")
-    outputs, params, summary = stage.execute(ctx)
+    try:
+        outputs, params, summary = stage.execute(ctx)
+    except PermissionError as e:
+        where = e.filename or "a project file"
+        raise PipelineError(f"no permission to write {where}", stage=stage.key,
+                            cause="the project folder (or part of it) is read-only for your user",
+                            remedy=f"make it writable (for example: chmod -R u+w '{ctx.project.root}') or copy the "
+                                   "project to a writable location, then resume; outputs of this step were not "
+                                   "accepted") from e
     if ctx.dry_run:
         ui.status("DRY-RUN", f"{stage.title}: no outputs written, no checkpoint")
         return

@@ -58,9 +58,13 @@ def parse(txt_path, bams):
         if head[:6] != fixed:
             raise PipelineError(f"unexpected featureCounts columns: {head[:6]}", stage="featurecounts")
         cols = head[6:]
-        if [os.path.abspath(c) for c in cols] != [os.path.abspath(str(b)) for b in bams]:
-            raise PipelineError("featureCounts sample columns do not match the BAM list/order", stage="featurecounts")
-        genes, counts, seen = [], {b: [] for b in cols}, set()
+        want = [str(b) for b in bams]
+        # featureCounts records the BAM paths it was given. A moved or copied project holds the same files in
+        # another directory, so the columns are matched by file name (unique within a project), in order.
+        if [os.path.basename(c) for c in cols] != [os.path.basename(w) for w in want]:
+            raise PipelineError(f"featureCounts sample columns {[os.path.basename(c) for c in cols]} do not match "
+                                f"the BAM list/order {[os.path.basename(w) for w in want]}", stage="featurecounts")
+        genes, counts, seen = [], {b: [] for b in want}, set()
         for lineno, line in enumerate(f, 3):
             c = line.rstrip("\n").split("\t")
             if len(c) != len(head):
@@ -71,7 +75,7 @@ def parse(txt_path, bams):
                 raise PipelineError(f"empty or duplicate gene ID at line {lineno}: {gid!r}", stage="featurecounts")
             seen.add(gid)
             genes.append(gid)
-            for b, v in zip(cols, c[6:]):
+            for b, v in zip(want, c[6:]):
                 try:
                     x = float(v)
                 except ValueError:

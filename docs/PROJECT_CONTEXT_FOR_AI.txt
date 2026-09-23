@@ -5,7 +5,7 @@ Repository : https://github.com/vipin839/rnaseq_pipeline   (branch: main)
 Local path : ~/rnaseq_pipeline   (Ubuntu 24.04 under WSL2 on the author's laptop)
 Version    : 1.1.0 (single source: __version__ in src/rnaseq_pipeline/__init__.py), 2026-09-22
 Languages  : Python 3.10+ (pre-processing, orchestration)  +  R 4.x (DESeq2 and downstream)
-Size       : installable Python package + R scripts; 208 automated tests
+Size       : installable Python package + R scripts; 252 automated tests
 Document   : docs/PROJECT_CONTEXT_FOR_AI.txt — one self-contained description of the project:
              purpose, theory, architecture, workflow, usage, validation, history, limits, roadmap.
 

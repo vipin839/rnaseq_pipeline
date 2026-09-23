@@ -714,7 +714,8 @@ def test_killed_during_alignment_then_resumed(project, tmp_path):
         (bin_dir / f.name).symlink_to(f)
     (bin_dir / "hisat2").unlink()
     slow, started = tmp_path / "slow", tmp_path / "started"
-    (bin_dir / "hisat2").write_text(f'#!/bin/sh\nif [ -e "{slow}" ]; then touch "{started}"; sleep 31.73; fi\n'
+    (bin_dir / "hisat2").write_text(f'#!/bin/sh\ncase "$*" in *--version*) exec "{tools / "hisat2"}" "$@";; esac\n'
+                                    f'if [ -e "{slow}" ]; then touch "{started}"; sleep 31.73; fi\n'
                                     f'exec "{tools / "hisat2"}" "$@"\n')
     (bin_dir / "hisat2").chmod(0o755)
     (root / "envs" / "rnaseq-r").symlink_to(RSCRIPT.parent.parent)
@@ -754,3 +755,122 @@ def test_killed_during_alignment_then_resumed(project, tmp_path):
     assert aligned == ["Ctrl1"], aligned                                        # the other samples were reused
     assert (dst / "counts" / "gene_count_matrix.tsv").read_bytes() == \
         (p / "counts" / "gene_count_matrix.tsv").read_bytes()                   # same result as an uninterrupted run
+
+
+# ---------------------------------------------------------------- P1/H5: failure injection on a finished project
+def _fake_tool(tmp_path, name, body):
+    d = tmp_path / "fakebin"
+    d.mkdir(exist_ok=True)
+    f = d / name
+    f.write_text("#!/bin/sh\n" + body + "\n")
+    f.chmod(0o755)
+    return f
+
+
+def _stage(key):
+    from rnaseq_pipeline import workflow
+    return workflow.STAGES.index(workflow.BY_KEY[key]) + 1, workflow.BY_KEY[key]
+
+
+def test_outdated_tool_refused_before_the_stage_starts(project, tmp_path, monkeypatch):
+    import shutil as sh
+    from rnaseq_pipeline import PipelineError, runner, workflow
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    ctx = _ctx(dst)
+    real = sh.which("featureCounts", path=runner.child_env()["PATH"])
+    fake = _fake_tool(tmp_path, "featureCounts",
+                      f'if [ "$1" = "-v" ]; then echo "featureCounts v1.5.0"; exit 0; fi\nexec "{real}" "$@"')
+    monkeypatch.setitem(runner._tool_env, "path_prefix", [str(fake.parent)] + runner._tool_env["path_prefix"])
+    before = (dst / "logs" / "commands.jsonl").read_text()
+    with pytest.raises(PipelineError) as e:
+        workflow.run_stage(ctx, *_stage("featurecounts_completed"))
+    assert "featureCounts" in str(e.value) and "1.5.0" in str(e.value) and "2.0.0" in str(e.value), str(e.value)
+    assert (dst / "logs" / "commands.jsonl").read_text() == before           # nothing was run
+
+
+def test_permission_denied_is_explained(project, tmp_path):
+    from rnaseq_pipeline import PipelineError, workflow
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    ctx = _ctx(dst)
+    counts = dst / "counts"                   # read-only like a project owned by another user / read-only copy
+    files = [f for f in counts.iterdir() if f.is_file()]
+    for f in files:
+        f.chmod(0o444)
+    counts.chmod(0o555)
+    try:
+        with pytest.raises(PipelineError) as e:
+            workflow.run_stage(ctx, *_stage("count_matrix_completed"))
+    finally:
+        counts.chmod(0o755)
+        for f in files:
+            f.chmod(0o644)
+    msg = str(e.value) + str(e.value.cause) + str(e.value.remedy)
+    assert "permission" in msg.lower() and "counts" in msg, msg
+
+
+def test_low_memory_asks_before_alignment(project, tmp_path, monkeypatch):
+    from rnaseq_pipeline import UserAbort, ui, workflow
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    ctx = _ctx(dst)
+    ctx.sysinfo["ram_available_gb"] = 0.1
+    asked = []
+    monkeypatch.setattr(ui, "ask_yes_no", lambda q, default=None: asked.append(q) or False)
+    with pytest.raises(UserAbort) as e:
+        workflow.run_stage(ctx, *_stage("alignment_completed"))
+    assert asked and "memory" in str(e.value)
+    assert (dst / "alignment" / "bam" / "Ctrl1.sorted.bam").exists()        # existing results untouched
+
+
+@pytest.mark.parametrize("mode,expect,remedy", [
+    ("killed", "SIGKILL", "memory"),
+    ("missing-package", "no package called", "--check"),
+])
+def test_r_failure_is_explained(project, tmp_path, monkeypatch, mode, expect, remedy):
+    from rnaseq_pipeline import PipelineError, ui, workflow
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    ctx = _ctx(dst)
+    full = next((dst / "results" / "deseq2").glob("*/full_results.tsv"))
+    body = {"killed": f'echo "[INFO] fitting"\nhead -c 200 "{full}" > "{full}.tmp" && mv "{full}.tmp" "{full}"\n'
+                      'kill -KILL $$',
+            "missing-package": "echo \"[ERROR] there is no package called ‘DESeq2’\"\nexit 1"}[mode]
+    fake = _fake_tool(tmp_path, "Rscript", body)
+    monkeypatch.setattr(type(ctx.envs), "rscript", lambda self: fake)
+    monkeypatch.setattr(ui, "ask_yes_no", lambda q, default=None: True)
+    with pytest.raises(PipelineError) as e:
+        workflow.run_stage(ctx, *_stage("deseq2_completed"))
+    assert expect in str(e.value), str(e.value)
+    assert remedy in (e.value.remedy or ""), e.value.remedy
+    status, _ = _status_after(dst, tmp_path / "s", lambda _: None)
+    if mode == "killed":                          # a half-written result is never accepted
+        assert status["deseq2_completed"] != "VALID" and status["report_generated"] != "VALID"
+
+
+def test_count_matrix_rebuilds_in_a_moved_project(project, tmp_path):
+    """P1/H9: featureCounts records absolute BAM paths; after moving/copying the project, re-running the count-matrix
+    stage (e.g. after a technical-replicate decision) must still match the columns to the samples."""
+    from rnaseq_pipeline import workflow
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    assert str(p) in (dst / "featurecounts" / "featurecounts.txt").read_text().splitlines()[1]
+    workflow.run_stage(_ctx(dst), *_stage("count_matrix_completed"))
+    assert (dst / "counts" / "gene_count_matrix.tsv").read_bytes() == (p / "counts" / "gene_count_matrix.tsv").read_bytes()
+
+
+def test_read_only_project_is_explained_not_a_traceback(project, tmp_path):
+    p, _, cfg = project
+    dst = _copy_project(p, tmp_path)
+    for d in [dst, *[x for x in dst.rglob("*") if x.is_dir() and not x.is_symlink()]]:
+        d.chmod(0o555)
+    try:
+        r = run_cli(["--config", str(cfg), "--project", str(dst)], ["10"], timeout=300)
+        check = run_cli(["--config", str(cfg), "--validate-project", str(dst)], [], timeout=300)
+    finally:
+        for d in [dst, *[x for x in dst.rglob("*") if x.is_dir() and not x.is_symlink()]]:
+            d.chmod(0o755)
+    out = r.stdout + r.stderr
+    assert "Traceback" not in out and "read-only" in out and "--validate-project" in out, out[-2000:]
+    assert check.returncode == 0 and "PROJECT HEALTH: PASS" in check.stdout     # checking needs no writes

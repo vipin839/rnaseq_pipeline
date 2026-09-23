@@ -49,9 +49,18 @@ def run(rscript, params_path, log_file, validate_only=False):
                 ui.status(tag, "R: " + msg)
     if res.returncode != 0:
         err = [l for l in (res.stdout or "").splitlines() if l.startswith("[ERROR]")]
-        raise PipelineError("R/DESeq2 step failed: " + (err[-1][8:] if err else "see log"), stage="deseq2",
-                            cause=runner.tail_file(log_file) if log_file else None,
-                            remedy=f"see {log_file}; fix the metadata/design and re-run")
+        meaning = runner.describe_exit(res.returncode)
+        what = err[-1][8:] if err else (meaning or f"exit code {res.returncode}")
+        if meaning or "no package called" in what or "there is no package" in what:
+            remedy = ("the R environment is incomplete or broken: run 'rnaseq-pipeline --check', then main menu 4 "
+                      "(Manage Dependencies) to repair it; the metadata and design are not the problem"
+                      if not meaning else
+                      "free memory (close other programs, or use a machine with more RAM) and re-run DESeq2; "
+                      "partial results are not accepted")
+        else:
+            remedy = f"see {log_file}; fix the metadata/design and re-run"
+        raise PipelineError("R/DESeq2 step failed: " + what, stage="deseq2",
+                            cause=runner.tail_file(log_file) if log_file else None, remedy=remedy)
     return res
 
 

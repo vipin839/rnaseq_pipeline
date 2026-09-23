@@ -66,6 +66,19 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **No orphaned processes from quick commands.** Version probes and checks such as `samtools flagstat` ran without
+  the process-group handling of pipeline commands; on Ctrl-C/SIGTERM Python stopped only the direct child, so the
+  real program behind a wrapper script (hisat2, hisat2-build, fastqc) kept running. They now run in their own
+  process group, which is stopped on interrupt or timeout.
+* **Count matrix could not be rebuilt in a moved or copied project.** featureCounts records absolute BAM paths and
+  they were compared with the project's current location ("sample columns do not match"). Columns are now matched by
+  file name, in order.
+* **Outdated or unusable tools are refused before a step starts** (e.g. featureCounts 1.5.0 when 2.0.0 is the
+  minimum); previously only their presence was checked and they ran.
+* **Clear explanations instead of tracebacks or wrong advice:** a read-only project (opening it, or writing during a
+  step) names the folder and the fix and points to the read-only `--validate-project`; an R process killed by a
+  signal says so (e.g. SIGKILL, often out of memory); a missing R package points to repairing the R environment
+  instead of "fix the metadata/design".
 * **Strandedness in the project state is checked against the confirmed decision.** Old: if the value later stages
   read (project state) differed from the checkpointed decision, featureCounts results computed with the old value
   stayed VALID, and a later re-run would silently use the new one. New: the strandedness stage is INVALID until the
@@ -105,7 +118,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 244 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 252 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

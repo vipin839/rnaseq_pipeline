@@ -255,3 +255,21 @@ def test_index_build_crash_handling(tmp_path, monkeypatch, mode, calls, expect):
     assert len(lines) == calls, lines
     if calls == 2:
         assert lines[0].startswith("-p 4") and lines[1].startswith("-p 1")
+
+
+def test_interrupted_informational_command_leaves_no_orphans():
+    """P1/H10: quick commands (version probes, flagstat, quickcheck) run through runner.tool_output/tool_run. Many
+    tools are wrapper scripts (hisat2, fastqc) whose real program is a grandchild; Ctrl-C/SIGTERM must stop it too."""
+    import signal
+
+    def interrupt():
+        time.sleep(1)
+        os.kill(os.getpid(), signal.SIGINT)
+    for fn in (runner.tool_output, runner.tool_run):
+        threading.Thread(target=interrupt, daemon=True).start()
+        t0 = time.time()
+        with pytest.raises(KeyboardInterrupt):
+            fn(["sh", "-c", "sleep 30.4919; true"], timeout=60)      # the wrapper's child is the real work
+        assert time.time() - t0 < 15
+        time.sleep(0.3)
+        assert subprocess.run(["pgrep", "-f", r"^sleep 30\.4919$"], capture_output=True).returncode != 0, fn.__name__

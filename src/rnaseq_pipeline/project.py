@@ -103,7 +103,14 @@ class Project:
 
     # ---------- locking (one pipeline process per project) ----------
     def lock(self):
-        self._lock_fh = open(self.root / ".lock", "w")
+        try:
+            self._lock_fh = open(self.root / ".lock", "w")
+        except PermissionError as e:
+            raise PipelineError(f"the project folder is read-only for your user: {self.root}",
+                                cause="work on a project writes results, logs and checkpoints into its folder",
+                                remedy=f"check it without changes: rnaseq-pipeline --validate-project '{self.root}'; "
+                                       f"to continue it, make it writable (chmod -R u+w '{self.root}') or copy it "
+                                       "to a writable location") from e
         try:
             fcntl.flock(self._lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

@@ -76,9 +76,11 @@ def parse_version(text, key):
     return None
 
 
-def detect_tools():
+def detect_tools(only=None):
     rows = []
     for key, exe, vcmd, minv, pkg, env, required, purpose in TOOLS:
+        if only is not None and exe not in only:
+            continue
         path = runner.which(exe)
         rec = {"key": key, "exe": exe, "path": str(path) if path else None, "version": None,
                "min_version": minv, "package": pkg, "env": env, "required": required, "purpose": purpose}
@@ -172,6 +174,21 @@ def write_versions(path, tools, r_info, r_pkgs):
         lines.append(f"R:{p['package']}\t{p['version'] or ''}\t\t{p['status']}")
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def unusable(executables):
+    """Problems with the installed versions of these executables (outdated, or unable to run on this CPU)."""
+    problems = []
+    by_exe = {t["exe"]: t for t in detect_tools(only={*executables})}
+    for exe in executables:
+        t = by_exe.get(exe)
+        if not t or t["status"] in ("AVAILABLE", "MISSING", "OPTIONAL"):
+            continue
+        if t["status"] == "OUTDATED":
+            problems.append(f"{exe} {t['version']} is older than the minimum {t['min_version']}")
+        else:
+            problems.append(f"{exe}: {t.get('note') or t['status'].lower()}")
+    return problems
 
 
 def cpu_fix_command(envs, tool):
