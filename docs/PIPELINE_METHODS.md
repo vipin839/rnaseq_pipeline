@@ -87,6 +87,8 @@ Invalid trimmed output stops the pipeline.
   valid index is never rebuilt.
 
 ## 7. Alignment
+*Aligner:* HISAT2 is the only supported and validated aligner in this version (setting `aligner: hisat2`; STAR is shown as not available and refused). The aligner is recorded with the checkpoint.
+
 `hisat2 -p N --dta --new-summary --rg-id S --rg SM:S [--known-splicesite-infile] (-1 R1 -2 R2 | -U R)` piped
 into `samtools sort -@ N -m MEM -T temp` → `S.partial.bam`. **Every process in the pipe is checked** (pipefail semantics).
 Then `samtools quickcheck`, rename to `S.sorted.bam`, `samtools index`. No SAM file is ever written.

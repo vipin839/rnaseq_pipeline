@@ -3,7 +3,18 @@ import os
 import re
 from pathlib import Path
 
-from . import PipelineError, runner
+from . import PipelineError, runner, ui
+
+
+def show_aligners():
+    """Every aligner with its real status, so it is always clear which one runs and why."""
+    from . import config as C
+    ui.section("ALIGNER")
+    rows = [(name, status.split(" — ")[0], "installed" if runner.which(exe) else "not installed",
+             status.split(" — ")[1] if " — " in status else "")
+            for (name, status), exe in zip(C.ALIGNERS.values(), ("hisat2", "STAR"))]
+    ui.table(rows, ["Aligner", "Status", "On this system", "Note"])
+    ui.info("HISAT2 will be used (the only supported and validated aligner in this version)")
 
 
 def sort_memory(cfg, threads, mem_gb):

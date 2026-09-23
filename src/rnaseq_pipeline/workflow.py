@@ -636,8 +636,8 @@ class ReferenceStage(Stage):
 class AlignmentStage(Stage):
     key, title, depends, expensive = "alignment_completed", "ALIGNMENT (HISAT2)", \
         ("trimming_completed", "reference_ready"), True
-    result_settings = ("hisat2_parameters", "min_overall_alignment_rate_fail")
-    settings = ("hisat2_parameters", "samtools_sort_memory_per_thread", "min_overall_alignment_rate_fail",
+    result_settings = ("aligner", "hisat2_parameters", "min_overall_alignment_rate_fail")
+    settings = ("aligner", "hisat2_parameters", "samtools_sort_memory_per_thread", "min_overall_alignment_rate_fail",
                 "min_overall_alignment_rate_warn")
 
 
@@ -648,6 +648,7 @@ class AlignmentStage(Stage):
         trimmed = bool((ctx.project.state.get("qc_decision") or {}).get("decision") == "trim")
         return [("Samples", len(ctx.samples)),
                 ("Validated", f"{len(ctx.samples)}/{len(ctx.project.samples)}"),
+                ("Aligner", "HISAT2 (supported and validated; STAR not available in this version)"),
                 ("Input reads", "trimmed" if trimmed else "raw"),
                 ("Reference", r.get("label")), ("Threads", ctx.threads),
                 ("Splice sites", "in index" if r.get("index_has_splice_sites") else "supplied at alignment"),
@@ -1210,8 +1211,15 @@ def settings_changes(ctx, stage, data):
     if recorded is None:  # checkpoint written by a version that did not record settings
         return []
     now = settings_snapshot(ctx.cfg, stage)
+    defaults = None
     changes = []
     for k in sorted(set(recorded) | set(now)):
+        if k not in recorded:
+            # a setting added in a later version: the old run used its default behaviour (e.g. HISAT2 before
+            # 'aligner' existed), so only a non-default current value is a change
+            if defaults is None:
+                defaults = C.load_yaml(C.DEFAULT_CONFIG)
+            recorded = {**recorded, k: C.get(defaults, k)}
         if json.dumps(recorded.get(k), sort_keys=True, default=str) != json.dumps(now.get(k), sort_keys=True,
                                                                                   default=str):
             changes.append(f"setting '{k}' changed ({_short(recorded.get(k))} -> {_short(now.get(k))})")

@@ -79,9 +79,20 @@ def resolve_memory_gb(cfg, ram_gb):
     return V.number(m, "max_memory_gb", 0.5, ram_gb)
 
 
+# Aligners and their status. Only an aligner implemented AND validated end to end (index, execution, BAM
+# validation, checkpoints, resume, tests, real data) may be selected; the pipeline never switches silently.
+ALIGNERS = {"hisat2": ("HISAT2", "SUPPORTED AND VALIDATED"),
+            "star": ("STAR", "NOT AVAILABLE — planned; not implemented or validated in this version")}
+
+
 def validate(cfg, cores=None, ram_gb=None):
     """Return a list of human-readable problems (empty if valid)."""
     errs = []
+    al = str(cfg.get("aligner", "hisat2")).lower()
+    if al != "hisat2":
+        name, status = ALIGNERS.get(al, (al, "unknown aligner"))
+        errs.append(f"aligner: {name} is {status.split(' — ')[0].lower()}"
+                    + (f" ({status.split(' — ')[1]})" if " — " in status else "") + "; use 'hisat2'")
 
     def chk(fn, *a, **k):
         try:

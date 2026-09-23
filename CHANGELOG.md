@@ -56,6 +56,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
 * **Pre-flight checks:** required tools per stage before it starts; RAM before alignment (with an explanation and a
   choice); more than one organism in a project is refused; Rscript is required before the design stage.
 * Decision screens (quality gate, trimming, strandedness, design) show WHAT / WHY / OPTIONS / CONSEQUENCE.
+* **Aligner status is shown and enforced.** A new project shows every aligner with its real status (HISAT2:
+  supported and validated; STAR: not available — planned, not implemented or validated) and whether it is installed.
+  The new setting `aligner` accepts only `hisat2` (anything else is refused with the reason) and is recorded with the
+  alignment checkpoint, so the aligner can never change silently. A setting that did not exist when a checkpoint
+  was written counts as its default (the behaviour of that run), so upgrading does not force recomputation.
 * **Quality gate "Review the evidence per sample" option.** Shows each sample's metrics next to the thresholds,
   explains each finding as a technical problem (trimming helps) or a normal RNA-seq pattern (duplication,
   per-base content bias), lists the report files, and returns to the same decision. "Stop pipeline" is now option 5.
@@ -129,7 +134,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 257 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 260 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

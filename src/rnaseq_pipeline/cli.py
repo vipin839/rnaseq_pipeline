@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from . import doctor, project_health
-from . import (PipelineError, Terminated, install_signal_handlers, UserAbort, __version__, data_manager, dependency_manager, entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
+from . import (PipelineError, Terminated, install_signal_handlers, UserAbort, __version__, alignment, data_manager, dependency_manager, entrez, environment_manager, logger, reference_manager, runner, storage, system_check, ui, workflow)
 from . import config as C
 from . import validators as V
 from .project import DEFAULT_PROJECTS_DIR, Project
@@ -580,6 +580,7 @@ class App:
         return ref
 
     def optional_databases(self, p):
+        alignment.show_aligners()
         ui.section("DATABASES")
         print("PRIMARY DATABASES (required)\n  Genome FASTA\n  Gene annotation GTF\n  Transcript annotation (from GTF)")
         print("\nOPTIONAL DATABASES (only if you request them)\n  Gene ID annotation (Bioconductor OrgDb)\n"

@@ -933,3 +933,28 @@ def test_quality_gate_review_shows_evidence_then_returns_to_decision(project, tm
     assert "adapter" in out.lower() and "normal for RNA-seq" in out           # technical vs biological explained
     assert "multiqc_report.html" in out
     assert json.loads((dst / "qc" / "assessment" / "qc_decision.json").read_text())["decision"] == "trim"
+
+
+def test_aligner_status_shown_before_alignment(project):
+    p, out, _ = project
+    block = out[out.index("ALIGNER"):out.index("ALIGNER") + 600]
+    assert "HISAT2" in block and "SUPPORTED AND VALIDATED" in block
+    assert "STAR" in block and "NOT AVAILABLE" in block
+    assert json.loads((p / "checkpoints" / "alignment_completed.json").read_text())["params"]["settings"]["aligner"] \
+        == "hisat2"
+
+
+def test_setting_added_in_a_later_version_does_not_invalidate(project, tmp_path):
+    """A checkpoint written before a setting existed was made with that setting's default behaviour (e.g. older
+    projects aligned with HISAT2 before 'aligner' existed); upgrading must not force recomputation."""
+    def drop_aligner(p):
+        f = p.path("checkpoints", "alignment_completed.json")
+        d = json.loads(f.read_text())
+        del d["params"]["settings"]["aligner"]
+        f.write_text(json.dumps(d))
+    p, _, _ = project
+    status, memo = _status_after(p, tmp_path, drop_aligner)
+    assert status["alignment_completed"] == "VALID", memo.get("alignment_completed")
+    # but a recorded value that differs from the current one is still a change
+    status, _ = _status_after(p, tmp_path / "b", lambda q: _set(q, "hisat2_parameters.no_mixed", True))
+    assert status["alignment_completed"] != "VALID"

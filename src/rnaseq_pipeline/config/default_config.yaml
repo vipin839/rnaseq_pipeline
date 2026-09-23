@@ -86,6 +86,8 @@ hisat2_build:
   extra_args: []
 
 # ---------------- Alignment (HISAT2) ----------------
+# Aligner. Only HISAT2 is implemented and validated in this version; STAR is planned and not available.
+aligner: hisat2
 hisat2_parameters:
   dta: true                 # --dta: report alignments tailored for StringTie transcript assembly
   use_known_splice_sites: true

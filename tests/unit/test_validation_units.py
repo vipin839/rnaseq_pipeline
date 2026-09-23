@@ -694,3 +694,13 @@ def test_failure_screen_names_the_step_the_user_sees(capsys):
         ui.explain_failure(PipelineError("x", stage=tag))
         assert step in capsys.readouterr().out, tag
     assert len({ui.STAGE_TITLES[s.key] for s in workflow.STAGES}) == len(workflow.STAGES)
+
+
+# ---------------------------------------------------------------- P1/M4: aligner shown with its real status
+def test_only_validated_aligner_accepted():
+    from rnaseq_pipeline import config as C
+    cfg = C.load()
+    assert cfg["aligner"] == "hisat2" and not C.validate(cfg)
+    cfg["aligner"] = "star"
+    errs = C.validate(cfg)
+    assert any("STAR" in e and "not available" in e for e in errs), errs
