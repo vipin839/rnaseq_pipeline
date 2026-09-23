@@ -35,6 +35,9 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   checks every contrast's direction against the group means. Reason: an independent layer must not depend on the
   component it checks. Consequence: inconsistent results stop the DESeq2 stage, and resume or `--validate-project`
   marks them INVALID. Recorded paths are re-pointed when a project has been moved.
+* **Plot data is reconciled with the results.** Old: plots were only checked to exist. New: the data table behind
+  every plot must match the result files (MA/volcano genes, values and up/down labels; heatmap gene lists and
+  z-scoring; library sizes = count-matrix column sums; well-formed PCA/distance/correlation tables).
 * **The report is validated after it is written:** every link and image must exist, the document must be complete, and
   every number marked in it (samples, reference, strandedness, formula, thresholds, up/down/significant/tested per
   contrast) must equal the value re-derived from the result files.
@@ -93,7 +96,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 222 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 227 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

@@ -517,3 +517,65 @@ def test_missing_conda_export_still_detected(project, tmp_path):
     (dst / "pipeline_manifest" / "environment.yml").unlink()
     rep = report_manager.generate(ctx)
     assert any("missing" in x for x in report_manager.validate(ctx, rep))
+
+
+# ---------------------------------------------------------------- P1/H2: plot data reconciled with the results
+def _contrast_dir(dst):
+    summary = json.loads((dst / "results" / "deseq2" / "deseq2_summary.json").read_text())
+    return Path(next(iter(summary["contrasts"].values()))["dir"])
+
+
+def _edit_tsv(path, fn):
+    head, rows = _read_tsv(path)
+    rows = fn(rows) or rows
+    _write_tsv(path, head, rows)
+
+
+def _volcano_hides_an_up_gene(dst):
+    def fn(rows):
+        next(r for r in rows if r["regulation"] == "up")["regulation"] = "ns"
+    _edit_tsv(_contrast_dir(dst) / "plot_data" / "volcano_data.tsv", fn)
+
+
+def _ma_drops_a_gene(dst):
+    _edit_tsv(_contrast_dir(dst) / "plot_data" / "ma_plot_data.tsv", lambda rows: rows[:-1])
+
+
+def _library_size_wrong(dst):
+    def fn(rows):
+        rows[0]["library_size"] = str(int(float(rows[0]["library_size"])) + 1000)
+    _edit_tsv(dst / "results" / "tables" / "library_sizes.tsv", fn)
+
+
+def _heatmap_shows_wrong_gene(dst):
+    full = _read_tsv(_contrast_dir(dst) / "full_results.tsv")[1]
+    outsider = next(r["gene_id"] for r in full if r["regulation"] == "ns")
+    def fn(rows):
+        rows[0]["gene_id"] = outsider
+    _edit_tsv(_contrast_dir(dst) / "plot_data" / "significant_heatmap_zscores.tsv", fn)
+
+
+def _correlation_not_symmetric(dst):
+    def fn(rows):
+        k = [c for c in rows[0] if c != "sample"][1]
+        rows[0][k] = "0.1"
+    _edit_tsv(dst / "results" / "tables" / "sample_correlation.tsv", fn)
+
+
+@pytest.mark.parametrize("tamper,expect", [
+    (_volcano_hides_an_up_gene, "volcano"),
+    (_ma_drops_a_gene, "MA"),
+    (_library_size_wrong, "library size"),
+    (_heatmap_shows_wrong_gene, "heatmap"),
+    (_correlation_not_symmetric, "correlation"),
+], ids=["volcano-regulation", "ma-gene-missing", "library-size", "heatmap-genes", "correlation-matrix"])
+def test_plot_data_reconciled_with_results(project, tmp_path, tamper, expect):
+    from rnaseq_pipeline import PipelineError, r_bridge
+    from rnaseq_pipeline.project import Project
+    p, _, _ = project
+    dst, params = _deseq2_copy(p, tmp_path)
+    assert r_bridge.validate_outputs(Project.open(dst), params)
+    tamper(dst)
+    with pytest.raises(PipelineError) as e:
+        r_bridge.validate_outputs(Project.open(dst), params)
+    assert expect in str(e.value), str(e.value)

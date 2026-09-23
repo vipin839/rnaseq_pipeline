@@ -159,6 +159,13 @@ of freedom. The design is re-checked in R (`--validate-only`) before being confi
    a fold-change sign that matches mean(numerator group) vs mean(baseline group) of the normalized counts (a
    swapped baseline gives ~0%; checked when there are at least 5 such genes). The same checks run again on resume
    and in `--validate-project`, with the recorded paths re-pointed if the project was moved.
+10. Every plot is drawn from a data table saved next to it, and those tables are **reconciled with the results**:
+   MA and volcano data must contain the same genes, baseMean, fold changes, padj and up/down labels as
+   `full_results` (so a plot cannot highlight different genes than the tables); the heatmaps must show exactly the
+   significant genes (up to `heatmap_max_genes`) and the top `top_n_genes` genes by padj, each row z-scored; library
+   sizes must equal the count-matrix column sums; PCA, distance and correlation tables must cover the samples with
+   their groups and be well-formed (symmetric, correct diagonal, correlations within [-1, 1]). The VST values behind
+   PCA and heatmaps come from DESeq2 and are not recomputed; the rendered images are not inspected.
 
 ## 15. Optional enrichment
 If enabled and the packages are installed: clusterProfiler `enrichGO` (BP) and ReactomePA `enrichPathway` (human/mouse) on the up

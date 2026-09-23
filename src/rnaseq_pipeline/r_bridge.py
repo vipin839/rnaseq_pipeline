@@ -120,6 +120,8 @@ def validate_outputs(project, params):
                 problems.append(f"QC plot missing: {f}")
     if not problems:
         problems += independent_checks(params, summary)
+    if not problems:
+        problems += plot_data_checks(params, summary)
     if problems:
         raise PipelineError("DESeq2 output validation failed:\n  - " + "\n  - ".join(problems), stage="deseq2",
                             cause="the R results are inconsistent with the count matrix and design they were "
@@ -243,6 +245,146 @@ def independent_checks(params, summary):
                             f"log2FC sign matching mean({num}) vs mean({den}) of the normalized counts "
                             "(numerator and baseline appear swapped)")
         c["direction_check"] = {"genes": total, "agreeing": agree}
+    return problems
+
+
+def _close(a, b, rel=1e-9):
+    a, b = _num(a), _num(b)
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= rel * max(1.0, abs(a), abs(b))
+
+
+def _zscored_rows(path, samples, genes, label):
+    """A heatmap's data: exactly `genes` in order, one column per sample, every row z-scored (mean 0, sd 1, or a
+    constant row set to 0). Values are rounded to 4 decimals by R, hence the tolerance."""
+    rows = _rows(path)
+    head = list(rows[0]) if rows else []
+    problems = []
+    if [r["gene_id"] for r in rows] != genes:
+        problems.append(f"{label}: shows {len(rows)} gene(s) but should show the {len(genes)} gene(s) "
+                        f"{genes[:3]}{'…' if len(genes) > 3 else ''} in this order")
+    if head and head[1:] != samples:
+        problems.append(f"{label}: columns {head[1:]} are not the samples {samples}")
+    for r in rows:
+        v = [_num(r.get(s)) for s in samples]
+        if any(x is None for x in v):
+            problems.append(f"{label}: non-numeric value for {r['gene_id']}")
+            break
+        mean = sum(v) / len(v)
+        sd = (sum((x - mean) ** 2 for x in v) / (len(v) - 1)) ** 0.5 if len(v) > 1 else 0.0
+        if abs(mean) > 1e-3 or not (abs(sd - 1) < 1e-3 or all(x == 0 for x in v)):
+            problems.append(f"{label}: row {r['gene_id']} is not z-scored (mean {mean:.4f}, sd {sd:.4f})")
+            break
+    return problems
+
+
+def _square_matrix(path, samples, label, diagonal, symmetric_tol, lo=None, hi=None):
+    rows = _rows(path)
+    if [r["sample"] for r in rows] != samples or (rows and [k for k in rows[0] if k != "sample"] != samples):
+        return [f"{label}: rows/columns are not the samples {samples}"]
+    for i, r in enumerate(rows):
+        for j, s in enumerate(samples):
+            v, w = _num(r[s]), _num(rows[j][samples[i]])
+            if v is None or w is None or abs(v - w) > symmetric_tol:
+                return [f"{label}: matrix is not symmetric ({samples[i]} vs {s}: {r[s]} / {rows[j][samples[i]]})"]
+            if i == j and abs(v - diagonal) > symmetric_tol:
+                return [f"{label}: diagonal value for {s} is {v}, expected {diagonal}"]
+            if (lo is not None and v < lo - symmetric_tol) or (hi is not None and v > hi + symmetric_tol):
+                return [f"{label}: value {v} for {samples[i]}/{s} outside [{lo}, {hi}]"]
+    return []
+
+
+def plot_data_checks(params, summary):
+    """Every plot is drawn from a data table saved next to it. Reconcile those tables with the result files, so a
+    plot cannot show different genes, values or up/down labels than the tables report:
+
+    * MA / volcano data = full_results (same genes, baseMean, fold changes, padj, regulation labels),
+    * heatmaps = exactly the significant genes (capped) / the top-N genes by padj, each row z-scored,
+    * library sizes = count-matrix column sums; PCA/distance/correlation tables cover the samples and are
+      well-formed (the VST values themselves come from DESeq2 and are not recomputed here).
+    """
+    problems = []
+    tdir = Path(params["table_dir"])
+    samples, counts = _matrix(params["counts"])
+    meta = {r["sample"]: r for r in _rows(params["metadata"])}
+    voi = params["variable_of_interest"]
+    for name, c in summary["contrasts"].items():
+        cdir = Path(c["dir"])
+        full = _rows(cdir / "full_results.tsv")
+        by_id = {r["gene_id"]: r for r in full}
+        lfc_col = "log2FoldChange_shrunk" if full and "log2FoldChange_shrunk" in full[0] else "log2FoldChange"
+        pdir = cdir / "plot_data"
+        ma = _rows(pdir / "ma_plot_data.tsv") if (pdir / "ma_plot_data.tsv").exists() else None
+        if ma is None:
+            problems.append(f"{name}: MA plot data missing")
+        elif [r["gene_id"] for r in ma] != [r["gene_id"] for r in full]:
+            problems.append(f"{name}: MA plot data has {len(ma)} gene(s), full_results has {len(full)}")
+        else:
+            bad = [r["gene_id"] for r in ma if not (_close(r["baseMean"], by_id[r["gene_id"]]["baseMean"])
+                   and _close(r["log2FC"], by_id[r["gene_id"]][lfc_col])
+                   and r["regulation"] == by_id[r["gene_id"]]["regulation"])]
+            if bad:
+                problems.append(f"{name}: MA plot data differs from full_results for {len(bad)} gene(s) (e.g. {bad[:3]})")
+        expected = [r for r in full if _num(r.get("padj")) is not None]
+        vd = _rows(pdir / "volcano_data.tsv") if (pdir / "volcano_data.tsv").exists() else None
+        if vd is None:
+            problems.append(f"{name}: volcano plot data missing")
+        elif [r["gene_id"] for r in vd] != [r["gene_id"] for r in expected]:
+            problems.append(f"{name}: volcano plot data has {len(vd)} gene(s), expected the {len(expected)} with padj")
+        else:
+            bad = [r["gene_id"] for r in vd if not (_close(r["log2FoldChange"], by_id[r["gene_id"]]["log2FoldChange"])
+                   and _close(r["padj"], by_id[r["gene_id"]]["padj"])
+                   and r["regulation"] == by_id[r["gene_id"]]["regulation"])]
+            if bad:
+                problems.append(f"{name}: volcano plot data differs from full_results for {len(bad)} gene(s) "
+                                f"(e.g. {bad[:3]}) — the plot would highlight different genes than the tables")
+        sig = [r["gene_id"] for r in full if r["regulation"] != "ns"]
+        hm = pdir / "significant_heatmap_zscores.tsv"
+        if len(sig) >= 2:
+            if not hm.exists():
+                problems.append(f"{name}: significant-gene heatmap data missing")
+            else:
+                problems += [f"{name}: {x}" for x in
+                             _zscored_rows(hm, samples, sig[:params["heatmap_max_genes"]], "significant-gene heatmap")]
+        elif hm.exists():
+            problems.append(f"{name}: significant-gene heatmap data exists but fewer than 2 genes are significant")
+        top = [r["gene_id"] for r in expected][:params["top_n_genes"]]
+        th = pdir / "top_genes_heatmap_zscores.tsv"
+        if len(top) >= 2:
+            if not th.exists():
+                problems.append(f"{name}: top-gene heatmap data missing")
+            else:
+                problems += [f"{name}: {x}" for x in _zscored_rows(th, samples, top, "top-gene heatmap")]
+    # QC plots
+    lib = _rows(tdir / "library_sizes.tsv") if (tdir / "library_sizes.tsv").exists() else None
+    if lib is None:
+        problems.append("library size plot data missing")
+    else:
+        colsum = {s: sum(v[j] for v in counts.values()) for j, s in enumerate(samples)}
+        if [r["sample"] for r in lib] != samples:
+            problems.append(f"library size plot data samples {[r['sample'] for r in lib]} != {samples}")
+        else:
+            bad = [r["sample"] for r in lib if _num(r["library_size"]) != colsum[r["sample"]]
+                   or r.get("group") != meta[r["sample"]][voi]]
+            if bad:
+                problems.append(f"library size plot data differs from the count-matrix column sums / groups for {bad}")
+    pca = _rows(tdir / "pca_coordinates.tsv") if (tdir / "pca_coordinates.tsv").exists() else None
+    if pca is None:
+        problems.append("PCA plot data missing")
+    elif [r["sample"] for r in pca] != samples or any(
+            r.get(v) != meta[r["sample"]][v] for r in pca for v in params["variables"]):
+        problems.append("PCA plot data: samples or their groups differ from the metadata")
+    var = _rows(tdir / "pca_variance.tsv") if (tdir / "pca_variance.tsv").exists() else []
+    total = sum(_num(r["variance_percent"]) or 0 for r in var)
+    if var and abs(total - 100) > 0.05 * len(var) + 0.1:
+        problems.append(f"PCA variance percentages sum to {total:.1f}, not 100")
+    for f, label, diag, tol, lo, hi in (("sample_distances.tsv", "sample distance matrix", 0.0, 1e-6, 0.0, None),
+                                        ("sample_correlation.tsv", "sample correlation matrix", 1.0, 1e-4, -1.0, 1.0)):
+        if not (tdir / f).exists():
+            problems.append(f"{label} data missing")
+        else:
+            problems += _square_matrix(tdir / f, samples, label, diag, tol, lo, hi)
     return problems
 
 
