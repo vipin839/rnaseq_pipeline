@@ -68,7 +68,9 @@ Samples: 6   Validated: 6/6   Reference: GRCh38 / GENCODE 46   Threads: 11   Est
 ### Decisions you will be asked to make
 
 * **Quality gate.** The assessment is PASS / REVIEW / TRIMMING RECOMMENDED / FAIL per sample, with reasons. You choose:
-  accept the recommendation, run fastp, skip trimming, or stop.
+  accept the recommendation, run fastp, skip trimming, **review the evidence per sample** (metrics next to their
+  thresholds, which findings are technical problems and which are normal for RNA-seq, and where the reports are;
+  then back to the same choice), or stop.
 * **Strandedness.** RSeQC evidence is shown per sample. You confirm the inferred value or choose one. If it cannot be
   determined you **must** choose. It is never guessed silently.
 * **Technical replicates.** If several runs belong to one biological sample (lanes), you are asked whether to sum them.

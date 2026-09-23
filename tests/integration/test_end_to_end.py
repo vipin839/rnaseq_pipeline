@@ -909,3 +909,27 @@ def test_multiqc_must_include_every_input(project, tmp_path):
         qc_manager.run_multiqc([d], tmp_path / "mq", "t", tmp_path / "mq.log", "raw_qc_completed",
                                expected_sources=zips)
     assert "Treat2_R1_fastqc.zip" in str(e.value), str(e.value)
+
+
+# ---------------------------------------------------------------- P1/M3: quality gate "Review" option
+def test_quality_gate_review_shows_evidence_then_returns_to_decision(project, tmp_path, monkeypatch, capsys):
+    from rnaseq_pipeline import ui, workflow
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    ctx = _ctx(dst)
+    offered, picks = [], iter(["Review", "Run fastp"])
+
+    def choose(title, options, default=None):
+        offered.append(list(options))
+        want = next(picks)
+        return next(i for i, o in enumerate(options) if o.startswith(want))
+    monkeypatch.setattr(ui, "choose", choose)
+    workflow.run_stage(ctx, *_stage("quality_assessed"))
+    out = capsys.readouterr().out
+    assert len(offered) == 2 and offered[0] == offered[1]                     # back to the same decision
+    assert [o.split(" (")[0] for o in offered[0]] == ["Accept recommendation", "Run fastp", "Skip trimming",
+                                                      "Review the evidence per sample", "Stop pipeline"]
+    assert "REVIEW — evidence per sample" in out and "Ctrl1" in out
+    assert "adapter" in out.lower() and "normal for RNA-seq" in out           # technical vs biological explained
+    assert "multiqc_report.html" in out
+    assert json.loads((dst / "qc" / "assessment" / "qc_decision.json").read_text())["decision"] == "trim"

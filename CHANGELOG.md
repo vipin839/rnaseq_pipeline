@@ -56,6 +56,9 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
 * **Pre-flight checks:** required tools per stage before it starts; RAM before alignment (with an explanation and a
   choice); more than one organism in a project is refused; Rscript is required before the design stage.
 * Decision screens (quality gate, trimming, strandedness, design) show WHAT / WHY / OPTIONS / CONSEQUENCE.
+* **Quality gate "Review the evidence per sample" option.** Shows each sample's metrics next to the thresholds,
+  explains each finding as a technical problem (trimming helps) or a normal RNA-seq pattern (duplication,
+  per-base content bias), lists the report files, and returns to the same decision. "Stop pipeline" is now option 5.
 * **Every failure screen also states Impact and Retry** (what was kept or discarded; whether and when a retry is
   safe and what it repeats), and names the step as shown on screen ("STEP 6: REFERENCE PREPARATION") instead of an
   internal key. Both fields are written to `logs/pipeline_errors.log`.
@@ -126,7 +129,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 256 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 257 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

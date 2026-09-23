@@ -392,6 +392,60 @@ def show_assessment(res):
     print("\nNote: FastQC warnings do not automatically mean data are unusable.")
 
 
+# What each finding means for bulk RNA-seq: technical problems that trimming fixes, versus patterns that are normal
+# for RNA-seq libraries (and are no reason to trim or drop a sample).
+_REVIEW_NOTES = [
+    ("adapter", "Adapter content: TECHNICAL — reads run into the adapter when the fragment is shorter than the read; "
+                "adapter bases do not align. Trimming removes them."),
+    ("tail", "Low-quality read ends: TECHNICAL — error-prone 3' bases lower alignment; trimming removes them."),
+    ("lower quartile", "Per-base lower quartile: TECHNICAL if it drops only at the ends (trimming helps); if it is low "
+                       "throughout, the run itself was poor (trimming cannot fix that)."),
+    ("N content", "N content: TECHNICAL — uncalled bases at some positions (often a sequencer issue)."),
+    ("duplication", "Duplication: usually normal for RNA-seq — highly expressed genes give many identical reads. Not a "
+                    "trimming issue and no reason to drop a sample."),
+    ("overrepresented", "Overrepresented sequences: often normal for RNA-seq (very abundant transcripts, e.g. "
+                        "mitochondrial/ribosomal RNA); check them in FastQC if the share is high."),
+    ("%GC", "GC deviating from the other samples: may indicate contamination or a different library type; check."),
+    ("reads (threshold", "Few reads: lower statistical power; trimming cannot fix this."),
+    ("R1/R2 read counts differ", "R1/R2 counts differ: the files are not proper mates (corrupt or truncated)."),
+]
+
+
+def show_review(ctx, res):
+    """Quality gate option 'Review': the evidence per sample, what it means, and where the full reports are."""
+    T = ctx.cfg["quality_gate"]
+    ui.section("REVIEW — evidence per sample (thresholds from config 'quality_gate')")
+    def f(v, d=1):
+        return "-" if v is None or (isinstance(v, float) and v != v) else f"{v:.{d}f}"
+
+    rows = []
+    for sid, r in res.items():
+        for mate, m in r["metrics"].items():
+            rows.append((sid, mate, r["status"], f"{m.get('total_sequences', 0):,}",
+                         f(m.get("adapter_max_percent")), f(m.get("tail_mean_quality")),
+                         f(m.get("min_lower_quartile"), 0), f(m.get("duplication_percent"), 0),
+                         f(m.get("gc_percent"), 0), f(m.get("n_content_max_percent")),
+                         f(m.get("overrepresented_max_percent"), 2)))
+    ui.table(rows, ["Sample", "Mate", "Status", "Reads", f"Adapter% (trim >{T['adapter_max_percent_trim']})",
+                    f"Tail Q (trim <{T['tail_mean_quality_trim']})", "Lower-quartile Q", "Dup%", "GC%", "N%",
+                    "Overrep%"])
+    found = " ".join(x for r in res.values() for x in r["reasons"])
+    fastqc_fails = {k for r in res.values() for m in r["metrics"].values()
+                    for k, v in (m.get("fastqc_status") or {}).items() if v in ("FAIL", "WARN")}
+    print("\nWhat the findings mean:")
+    for key, note in _REVIEW_NOTES:
+        if key in found:
+            print(f"  - {note}")
+    if "Per base sequence content" in fastqc_fails:
+        print("  - FastQC 'Per base sequence content' warning: normal for RNA-seq (random-hexamer priming bias in "
+              "the first ~12 bases); not a reason to trim.")
+    if "Sequence Duplication Levels" in fastqc_fails and "duplication" not in found:
+        print("  - FastQC 'Sequence Duplication Levels' warning: normal for RNA-seq (highly expressed genes).")
+    p = ctx.project
+    print(f"\nFull reports: {p.rel(p.path('qc', 'multiqc_raw', 'multiqc_report.html'))} · "
+          f"{p.rel(p.path('qc', 'assessment', 'raw', 'quality_assessment.html'))}\n")
+
+
 class QualityGateStage(Stage):
     key, title, depends = "quality_assessed", "QUALITY ASSESSMENT / QUALITY GATE", ("raw_qc_completed",)
     settings = ("trim_adapters", "quality_gate")
@@ -424,9 +478,14 @@ class QualityGateStage(Stage):
                 "if you trim, ALL samples are trimmed the same way (raw files are never modified); skipping "
                 "despite a recommendation usually lowers alignment rates",
                 "the recommendation above comes from the thresholds in config 'quality_gate'")
-            c = ui.choose("DECISION", [f"Accept recommendation ({'run fastp' if recommend else 'skip trimming'})",
-                                       "Run fastp", "Skip trimming", "Stop pipeline"])
-            if c == 3:
+            options = [f"Accept recommendation ({'run fastp' if recommend else 'skip trimming'})",
+                       "Run fastp", "Skip trimming", "Review the evidence per sample", "Stop pipeline"]
+            while True:
+                c = ui.choose("DECISION", options)
+                if c != 3:
+                    break
+                show_review(ctx, res)
+            if c == 4:
                 raise UserAbort("stopped at quality gate")
             decision = {0: "trim" if recommend else "skip", 1: "trim", 2: "skip"}[c]
             if decision == "skip" and recommend:

@@ -52,8 +52,12 @@ Metrics are parsed from `fastqc_data.txt`. Default thresholds (`quality_gate`):
 | Reads | < 1,000,000 | – | Low depth reduces power |
 | R1 ≠ R2 read counts | FAIL | | |
 
-FastQC WARN/FAIL flags alone never make a sample unusable. **Accept recommendation** trims *all* samples if any
-sample needs it, so that every sample is processed the same way.
+FastQC WARN/FAIL flags alone never make a sample unusable. The choices are **Accept recommendation**, **Run fastp**,
+**Skip trimming**, **Review the evidence per sample** and **Stop pipeline**. Accepting trims *all* samples if any
+sample needs it, so that every sample is processed the same way. *Review* shows every sample's metrics next to their
+thresholds, explains each finding as a technical problem (adapters, low-quality tails, N content — trimming helps)
+or a pattern that is normal for RNA-seq (duplication, per-base content bias, abundant transcripts), names the
+report files, and returns to the same decision. The decision is recorded in `qc/assessment/qc_decision.json`.
 
 ## 5. fastp (only if chosen)
 Defaults: `--detect_adapter_for_pe` (paired-end), `--qualified_quality_phred 20`, `--unqualified_percent_limit 40`,
