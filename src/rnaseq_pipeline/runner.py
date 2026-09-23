@@ -202,11 +202,16 @@ def tail_file(path, n=12):
         return ""
 
 
+def signal_of(code):
+    """The signal that killed a process, from a Popen return code (-N) or a shell-style one (128 + N); else None."""
+    if code is None:
+        return None
+    return -code if code < 0 else (code - 128 if 128 < code < 160 else None)
+
+
 def describe_exit(code):
     """Plain-language meaning of an exit code that says the program was killed by a signal."""
-    if code is None:
-        return ""
-    sig = -code if code < 0 else (code - 128 if 128 < code < 160 else None)
+    sig = signal_of(code)
     if sig == signal.SIGILL:
         from . import system_check
         missing = system_check.missing_x86_64_v3()

@@ -29,6 +29,7 @@ Every failure screen shows **Problem**, **Likely cause** and **Recommended actio
 | `invalid quality character` / `possible Phred+64` | Old Illumina 1.3–1.7 encoding | Convert, e.g. `seqtk seq -Q64 -V in.fq > out.fq`, then re-import |
 | `genome and annotation are not compatible` | Different assemblies or providers (e.g. GRCh37 GTF with GRCh38 FASTA, or `chr1` vs `1`) | Use a catalog package, or a matching FASTA + GTF from the same release |
 | `annotation looks like GFF3` | GFF3 supplied instead of GTF | `gffread annotation.gff3 -T -o annotation.gtf` |
+| `hisat2-build crashed (SIGSEGV) … retrying once with a single thread` | An intermittent crash inside HISAT2 2.2.x's multithreaded index build (not your files) | Nothing to do: the retry builds the same index. If the single-threaded retry also fails, the error says so; check free memory and disk |
 | HISAT2 index build killed / very slow | Not enough RAM | Keep `use_splice_sites_in_index: auto` (sites are then supplied at alignment), close other programs, or use a larger machine |
 | `primary alignments != input reads` | BAM truncated (disk full, killed process) | Free space and resume. The BAM was set aside as `.FAILED.bam` / `.invalid.bam` |
 | `overall alignment rate … < 20%` | Wrong organism or reference, or heavy contamination | Check the organism in the metadata and the FastQC overrepresented sequences |

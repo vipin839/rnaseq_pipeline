@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 from datetime import datetime
 from pathlib import Path
 
@@ -357,6 +358,9 @@ def index_valid(prefix, fasta_names):
     return True, f"{len(names)} sequences"
 
 
+BUILD_RETRY_SIGNALS = (signal.SIGSEGV, signal.SIGBUS, signal.SIGABRT)
+
+
 def build_index(paths, fa_info, threads, mem_gb, use_ss, log_file, extra_args=()):
     """Build HISAT2 index into a temp dir, validate, then move into place."""
     runner.run(["hisat2_extract_splice_sites.py", paths.gtf], stage="reference", stdout_file=paths.splice_sites,
@@ -378,10 +382,31 @@ def build_index(paths, fa_info, threads, mem_gb, use_ss, log_file, extra_args=()
         cmd += ["--ss", paths.splice_sites, "--exon", paths.exons]
     cmd += [str(x) for x in extra_args]
     cmd += [paths.genome, tmp / "genome"]
-    runner.run(cmd, stage="reference", log_file=log_file,
-               description="Building HISAT2 index (this can take a long time for large genomes)")
+    res = runner.run(cmd, stage="reference", log_file=log_file, check=False,
+                     description="Building HISAT2 index (this can take a long time for large genomes)")
     if runner.DRY_RUN:
         return
+    sig = runner.signal_of(res.returncode)
+    if sig in BUILD_RETRY_SIGNALS and threads > 1:
+        # hisat2-build 2.2.x occasionally crashes in its multithreaded phase (~0.6% of builds here; 0 of 395
+        # single-threaded builds crashed) and the index it builds does not depend on the thread count, so one
+        # single-threaded retry is safe. Out-of-memory kills and SIGILL are not retried: they would recur.
+        ui.warn(f"hisat2-build crashed ({signal.Signals(sig).name}) — an intermittent crash in HISAT2's multithreaded "
+                "index build, not a problem with your files. The partial index was discarded; retrying once with a "
+                "single thread (slower; the index is identical)")
+        shutil.rmtree(tmp)
+        tmp.mkdir(parents=True)
+        cmd[cmd.index("-p") + 1] = "1"
+        res = runner.run(cmd, stage="reference", log_file=log_file, check=False,
+                         description="Building HISAT2 index again (single thread)")
+    if res.returncode != 0:
+        meaning = runner.describe_exit(res.returncode)
+        raise PipelineError(f"hisat2-build failed (exit code {res.returncode})" + (f" — {meaning}" if meaning else ""),
+                            stage="reference", cause=(runner.tail_file(log_file) + f"\n  Full log: {log_file}") if log_file else None,
+                            remedy=("run 'rnaseq-pipeline --check': it names a build of the program that runs on "
+                                    "this CPU" if "SIGILL" in meaning else
+                                    "free memory (see the RAM estimate above) or disk space, then resume; the "
+                                    "partial index is never used"))
     ok, why = index_valid(tmp / "genome", fa_info["names"])
     if not ok:
         raise PipelineError(f"built HISAT2 index failed validation: {why}", stage="reference",

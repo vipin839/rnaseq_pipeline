@@ -58,6 +58,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **Intermittent HISAT2 index-build crash.** `hisat2-build` 2.2.3 crashes with SIGSEGV in about 0.6% of
+  multithreaded builds (3 of 480 here; 0 of 395 single-threaded builds), which stopped the reference stage (and made
+  one integration test fail intermittently). Now a crash by SIGSEGV/SIGBUS/SIGABRT discards the partial index and
+  retries once single-threaded; the index is byte-identical to a multithreaded build and is validated as always.
+  Out-of-memory kills and SIGILL are not retried.
 * `tests/data/make_synthetic.py`: a variable collision made the `strand` argument change gene strands; forward,
   unstranded and single-end datasets are now generated correctly (the default dataset is byte-identical).
 * Five over-broad `except Exception` handlers narrowed to the errors they are meant to handle.
@@ -77,7 +82,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 216 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 219 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

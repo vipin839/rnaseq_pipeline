@@ -79,7 +79,7 @@ Invalid trimmed output stops the pipeline.
 * **HISAT2 index:** splice sites and exons are built into the index only when the estimated RAM (about 60 bytes per genome bp,
   roughly 160–200 GB for human) is available. Otherwise the plain index is built (about 8 GB for human) and the known splice
   sites are passed at alignment time with `--known-splicesite-infile`. This is standard practice with a small loss of sensitivity. The index is built in
-  `index.building/` and validated with `hisat2-inspect -n`, whose sequence names must equal the FASTA names, before being moved into place. An existing
+  `index.building/` and validated with `hisat2-inspect -n`, whose sequence names must equal the FASTA names, before being moved into place. If `hisat2-build` crashes (SIGSEGV/SIGBUS/SIGABRT — an intermittent HISAT2 2.2.x multithreading crash), the partial index is discarded and the build is retried once with a single thread; the resulting index is identical. An existing
   valid index is never rebuilt.
 
 ## 7. Alignment

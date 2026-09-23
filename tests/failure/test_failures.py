@@ -180,3 +180,48 @@ def test_fastq_validation_pool_stops_on_interrupt(tmp_path):
         FV.validate_many(jobs, workers=2)
     assert time.time() - t0 < 5, "validation workers were not terminated promptly"
     assert not multiprocessing.active_children()
+
+
+# ---------------------------------------------------------------- P1/H6: intermittent hisat2-build crash
+@pytest.mark.skipif(not have("hisat2-build", "hisat2-inspect", "hisat2_extract_splice_sites.py"),
+                    reason="HISAT2 not installed")
+@pytest.mark.parametrize("mode,calls,expect", [
+    ("crash-when-multithreaded", 2, None),        # the observed hisat2-build 2.2.3 race: retried single-threaded
+    ("crash-always", 2, "SIGSEGV"),               # a crash that recurs is reported after one retry
+    ("out-of-memory", 1, "SIGKILL"),              # never retried: it would fail again
+])
+def test_index_build_crash_handling(tmp_path, monkeypatch, mode, calls, expect):
+    import random
+    import shutil as sh
+    from rnaseq_pipeline import reference_manager as R
+    real = sh.which("hisat2-build")
+    fake = tmp_path / "bin" / "hisat2-build"
+    fake.parent.mkdir()
+    log = tmp_path / "calls.txt"
+    action = {"crash-when-multithreaded": f'if [ "$2" != "1" ]; then kill -SEGV $$; fi\nexec "{real}" "$@"',
+              "crash-always": "kill -SEGV $$", "out-of-memory": "kill -KILL $$"}[mode]
+    fake.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n{action}\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setitem(runner._tool_env, "path_prefix", [])
+    rng = random.Random(3)
+    genome = "".join(rng.choice("ACGT") for _ in range(3000))
+    paths = R.RefPaths(tmp_path / "ref")
+    paths.genome.parent.mkdir(parents=True)
+    paths.gtf.parent.mkdir(parents=True)
+    paths.genome.write_text(">c1\n" + "\n".join(genome[i:i + 60] for i in range(0, 3000, 60)) + "\n")
+    paths.gtf.write_text('c1\tt\texon\t201\t700\t.\t+\t.\tgene_id "G1"; transcript_id "T1";\n'
+                         'c1\tt\texon\t1001\t1600\t.\t+\t.\tgene_id "G1"; transcript_id "T1";\n')
+    args = (paths, {"names": ["c1"]}, 4, 8, True, tmp_path / "ref.log")
+    if expect is None:
+        R.build_index(*args)
+        assert R.index_valid(paths.index_prefix, ["c1"])[0]
+    else:
+        with pytest.raises(PipelineError) as e:
+            R.build_index(*args)
+        assert expect in str(e.value)
+        assert not paths.index_dir.exists()          # nothing partial is ever put in place
+    lines = log.read_text().splitlines()
+    assert len(lines) == calls, lines
+    if calls == 2:
+        assert lines[0].startswith("-p 4") and lines[1].startswith("-p 1")
