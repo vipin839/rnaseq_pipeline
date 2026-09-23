@@ -172,9 +172,13 @@ If enabled and the packages are installed: clusterProfiler `enrichGO` (BP) and R
 and down gene sets, against the tested-gene universe. It is never required for the core results.
 
 ## Report and manifest
-The HTML report marks every key number (active samples, reference, strandedness, formula, alpha, log2FC threshold, and
-per contrast the tested/up/down/significant counts). After writing, the report is re-read and each marked number is
-compared with the value re-derived from the result files; every link and image must exist, the document must be complete,
+The HTML report marks its key numbers: active samples, reference, strandedness, formula, alpha, log2FC threshold;
+per contrast the tested/up/down/significant counts; per sample the input reads, HISAT2 input and overall alignment
+rate, primary mapped reads and mapped %, featureCounts assigned reads and reads counted in the matrix; and every
+software version. After writing, the report is re-read and each marked number is
+compared with the value re-derived from the file the tool itself wrote (FASTQ validation report, HISAT2 summary,
+samtools flagstat, featureCounts summary, count matrix, DESeq2 tables, manifest). Other numbers shown (for example
+uniquely aligned %, trimming counts, QC metrics) are copied from their files but not re-derived; every link and image must exist, the document must be complete,
 and no template placeholder may remain. A pilot-subset run is labelled as such at the top. The manifest records software
 versions, the redacted configuration, the design, input-file fingerprints, provider MD5s, the genome and annotation
 SHA-256, where the reference came from, and the command log. `--validate-project` repeats all of these checks.

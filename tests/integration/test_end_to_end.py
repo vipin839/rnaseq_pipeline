@@ -579,3 +579,34 @@ def test_plot_data_reconciled_with_results(project, tmp_path, tamper, expect):
     with pytest.raises(PipelineError) as e:
         r_bridge.validate_outputs(Project.open(dst), params)
     assert expect in str(e.value), str(e.value)
+
+
+# ---------------------------------------------------------------- P1/H3: every per-sample report number re-checked
+@pytest.mark.parametrize("key", ["reads:Ctrl1", "input:Ctrl1", "rate:Ctrl1", "primary_mapped:Ctrl1",
+                                 "mapped_pct:Ctrl1", "assigned:Ctrl1", "counted:Ctrl1", "version:hisat2",
+                                 "version:R"])
+def test_report_per_sample_numbers_checked(project, tmp_path, key):
+    """Each number is re-derived from the file the TOOL wrote (FASTQ validation report, HISAT2 summary, samtools
+    flagstat, featureCounts summary, count matrix, manifest record) — not from the table the report was built from."""
+    import re
+    from rnaseq_pipeline import report_manager
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    rep = dst / "reports" / "final_pipeline_report.html"
+    text = rep.read_text()
+    m = re.search(rf"data-check='{re.escape(key)}'>([^<]*)<", text)
+    assert m, f"report does not mark {key}"
+    assert report_manager.validate(_ctx(dst)) == []
+    rep.write_text(text.replace(m.group(0), f"data-check='{key}'>{m.group(1)}9<", 1))
+    problems = report_manager.validate(_ctx(dst))
+    assert any(key in x for x in problems), problems
+
+
+def test_report_validation_after_project_moved(project, tmp_path):
+    """Recorded absolute paths must not tie the report check to the project's old location."""
+    from rnaseq_pipeline import report_manager
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    s = dst / "results" / "deseq2" / "deseq2_summary.json"
+    s.write_text(s.read_text().replace(str(p), "/nonexistent/old/location"))
+    assert report_manager.validate(_ctx(dst)) == []

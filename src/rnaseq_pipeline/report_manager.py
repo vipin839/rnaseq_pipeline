@@ -101,6 +101,19 @@ def mark(key, value):
     return f"<span data-check='{esc(key)}'>{esc(value)}</span>"
 
 
+def fint(v):
+    return f"{int(v):,}"
+
+
+def fpct(v):
+    return f"{float(v):.2f}"
+
+
+def _tsv_rows(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f, delimiter="\t"))
+
+
 def kv_table(pairs):
     return "<table class='kv'>" + "".join(f"<tr><td>{esc(k)}</td><td>{v}</td></tr>" for k, v in pairs) + "</table>"
 
@@ -146,11 +159,12 @@ def generate(ctx):
     rows = []
     for sid, r in p.samples.items():
         m = r.get("metadata") or {}
-        rows.append((sid, r.get("status"), r.get("source"), r.get("accession") or "", r.get("layout"),
-                     f"{(r.get('reads') or {}).get('R1', ''):,}" if (r.get("reads") or {}).get("R1") else "",
-                     r.get("read_length") or "", m.get("geo_title") or m.get("sample_title") or "",
-                     r.get("fail_reason") or ""))
-    tb = "".join("<tr>" + "".join(f"<td>{esc(c)}</td>" for c in row) + "</tr>" for row in rows)
+        r1 = (r.get("reads") or {}).get("R1")
+        reads = (mark(f"reads:{sid}", fint(r1)) if sid in ctx.samples else esc(fint(r1))) if r1 else ""
+        rows.append([esc(x) for x in (sid, r.get("status"), r.get("source"), r.get("accession") or "", r.get("layout"))]
+                    + [reads] + [esc(x) for x in (r.get("read_length") or "", m.get("geo_title") or m.get("sample_title")
+                                                  or "", r.get("fail_reason") or "")])
+    tb = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in rows)
     sec("input", "Input data",
         f"<table><tr><th>Sample</th><th>Status</th><th>Source</th><th>Accession</th><th>Layout</th><th>Reads (R1)</th>"
         f"<th>Max length</th><th>Description</th><th>Failure</th></tr>{tb}</table>"
@@ -171,7 +185,14 @@ def generate(ctx):
                   ("Splice sites", "in index" if ref.get("index_has_splice_sites") else "supplied at alignment"),
                   ("Manifest", link(R, p.path("reference", "reference_manifest.yaml")))]))
 
-    sec("versions", "Software versions", tsv_table(p.path("logs", "software_versions.tsv"), 100))
+    sv = p.path("logs", "software_versions.tsv")
+    if sv.exists():
+        vrows = "".join(f"<tr><td>{esc(r['software'])}</td><td>{mark('version:' + r['software'], r['version'])}</td>"
+                        f"<td>{esc(r['status'])}</td></tr>" for r in _tsv_rows(sv))
+        sec("versions", "Software versions",
+            f"<table><tr><th>Software</th><th>Version</th><th>Status</th></tr>{vrows}</table><p>{link(R, sv)}</p>")
+    else:
+        sec("versions", "Software versions", "<p class='muted'>(not available)</p>")
 
     qa_raw = p.path("qc", "assessment", "raw", "quality_assessment.tsv")
     sec("rawqc", "Raw read QC",
@@ -198,11 +219,24 @@ def generate(ctx):
             tsv_table(p.path("qc", "assessment", "trimmed", "quality_assessment.tsv"), 100,
                       ["sample", "mate", "status", "total_sequences", "tail_mean_quality", "adapter_max_percent", "reasons"]))
 
+    asum = p.path("alignment", "reports", "alignment_summary.tsv")
+    arows = ""
+    for a in (_tsv_rows(asum) if asum.exists() else []):
+        sid, ok = a["sample"], a["sample"] in ctx.samples and a["status"] == "PASS"
+
+        def cell(k, v, sid=sid, ok=ok):
+            return mark(f"{k}:{sid}", v) if ok else esc(v)
+        arows += ("<tr>" + "".join(f"<td>{c}</td>" for c in (
+            esc(sid), esc(a["status"]), cell("input", fint(a["input_reads"])) + f" {esc(a['unit'])}",
+            cell("rate", fpct(a["overall_alignment_rate"])), esc(a["uniquely_aligned_pct"]),
+            cell("primary_mapped", fint(a["primary_mapped"])), cell("mapped_pct", fpct(a["mapped_pct"])),
+            esc(a["properly_paired_pct"]), esc(a["secondary"]), esc(a["supplementary"]), esc(a["unmapped"]),
+            esc(a["problems"]))) + "</tr>")
     sec("alignment", "Alignment (HISAT2)",
-        tsv_table(p.path("alignment", "reports", "alignment_summary.tsv"), 200,
-                  ["sample", "status", "input_reads", "overall_alignment_rate", "uniquely_aligned_pct", "mapped_pct",
-                   "properly_paired_pct", "secondary", "supplementary", "unmapped", "problems"]) +
-        f"<p>{link(R, p.path('alignment', 'reports', 'alignment_summary.tsv'))}</p>")
+        "<table><tr><th>Sample</th><th>Status</th><th>Input</th><th>Overall alignment rate %</th>"
+        "<th>Uniquely aligned %</th><th>Primary mapped</th><th>Mapped %</th><th>Properly paired %</th>"
+        f"<th>Secondary</th><th>Supplementary</th><th>Unmapped</th><th>Problems</th></tr>{arows}</table>"
+        f"<p>{link(R, asum)}</p>")
     sec("bamqc", "BAM QC",
         tsv_table(p.path("alignment", "reports", "bam_qc_summary.tsv"), 200) +
         f"<p>{link(R, p.path('qc', 'multiqc_alignment', 'multiqc_report.html'), 'MultiQC alignment report')}</p>")
@@ -225,13 +259,16 @@ def generate(ctx):
     fc_rows = ""
     if fc_stats.exists():
         st = json.loads(fc_stats.read_text())
-        fc_rows = "".join(f"<tr><td>{esc(k)}</td><td>{v['assigned']:,}</td><td>{v['total']:,}</td>"
-                          f"<td>{v['assigned_pct']}%</td></tr>" for k, v in st.items())
+        fc_rows = "".join(f"<tr><td>{esc(k)}</td><td>{mark(f'assigned:{k}', fint(v['assigned']))}</td>"
+                          f"<td>{v['total']:,}</td><td>{v['assigned_pct']}%</td></tr>" for k, v in st.items())
     sec("featurecounts", "featureCounts",
         f"<table><tr><th>Sample</th><th>Assigned</th><th>Total</th><th>Assigned %</th></tr>{fc_rows}</table>"
         f"<p>{link(R, p.path('featurecounts', 'featurecounts.txt'))} · {link(R, p.path('featurecounts', 'featurecounts.summary'))}</p>")
     cms = p.path("counts", "count_matrix_summary.txt")
+    counted = _column_sums(p.path("counts", "gene_count_matrix.tsv"))
+    crow = "".join(f"<tr><td>{esc(k)}</td><td>{mark(f'counted:{k}', fint(v))}</td></tr>" for k, v in counted.items())
     sec("counts", "Count matrix",
+        (f"<table><tr><th>Sample</th><th>Reads counted (column sum)</th></tr>{crow}</table>" if crow else "") +
         f"<pre>{esc(cms.read_text() if cms.exists() else '(missing)')}</pre>"
         f"<p>{link(R, p.path('counts', 'gene_count_matrix.tsv'))} · {link(R, p.path('counts', 'gene_count_matrix.csv'))}</p>")
 
@@ -252,7 +289,7 @@ def generate(ctx):
         f"<div class='grid'>{qc_figs}</div>")
     body = ""
     for name, c in (summ.get("contrasts") or {}).items():
-        cdir = Path(c["dir"])
+        cdir = p.path("results", "deseq2", name)   # never the recorded absolute path (the project may have moved)
         pdir = plots / name
         body += f"<h3>{esc(name)}</h3>" + kv_table([
             ("Comparison", esc(f"{c['numerator']} vs {c['denominator']} (denominator = baseline)")),
@@ -291,13 +328,98 @@ def generate(ctx):
     return out
 
 
+def _column_sums(path):
+    path = Path(path)
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        head = f.readline().rstrip("\n").split("\t")[1:]
+        sums = [0] * len(head)
+        for line in f:
+            for i, x in enumerate(line.rstrip("\n").split("\t")[1:]):
+                sums[i] += int(float(x))
+    return dict(zip(head, sums))
+
+
+def _flagstat_text(path):
+    """(primary, primary_mapped) from `samtools flagstat` text output (QC-passed + QC-failed)."""
+    vals = {}
+    for line in Path(path).read_text().splitlines():
+        m = re.fullmatch(r"(\d+) \+ (\d+) (primary mapped|primary)(?: \(.*\))?", line.strip())
+        if m:
+            vals[m.group(3)] = int(m.group(1)) + int(m.group(2))
+    return vals.get("primary"), vals.get("primary mapped")
+
+
+def _per_sample_expected(ctx):
+    """Per-sample numbers re-derived from the files the TOOLS wrote (not from the tables the report is built from):
+    FASTQ validation report, HISAT2 summary, samtools flagstat (BAM QC), featureCounts summary, count matrix, and
+    the manifest's record of the software that ran."""
+    from . import alignment as A
+    p = ctx.project
+    exp, problems = {}, []
+
+    def need(path, what):
+        if not Path(path).exists():
+            problems.append(f"cannot re-check {what}: {p.rel(path)} missing")
+            return False
+        return True
+
+    fv = p.path("data", "metadata", "fastq_validation_report.tsv")
+    if need(fv, "input read counts"):
+        for r in _tsv_rows(fv):
+            if r["sample"] in ctx.samples and r["mate"] == "R1" and r["reads"].isdigit():
+                exp[f"reads:{r['sample']}"] = fint(r["reads"])
+    for sid in ctx.samples:
+        hs = p.path("alignment", "reports", f"{sid}.hisat2.summary")
+        if need(hs, f"alignment numbers of {sid}"):
+            h = A.parse_hisat2_summary(hs)
+            exp[f"input:{sid}"] = fint(h.get("total", -1))
+            exp[f"rate:{sid}"] = fpct(h.get("overall_alignment_rate", -1))
+        fs = p.path("alignment", "reports", "samtools", f"{sid}.flagstat")
+        if need(fs, f"mapping numbers of {sid}"):
+            primary, pm = _flagstat_text(fs)
+            if primary and pm is not None:
+                exp[f"primary_mapped:{sid}"] = fint(pm)
+                exp[f"mapped_pct:{sid}"] = fpct(round(100 * pm / primary, 2))
+            else:
+                problems.append(f"cannot re-check mapping numbers of {sid}: flagstat output unreadable")
+    fc = p.path("featurecounts", "featurecounts.summary")
+    if need(fc, "assigned read counts"):
+        with open(fc) as f:
+            head = f.readline().rstrip("\n").split("\t")[1:]
+            for line in f:
+                cells = line.rstrip("\n").split("\t")
+                if cells[0] == "Assigned":
+                    for col, v in zip(head, cells[1:]):
+                        sid = Path(col).name.removesuffix(".sorted.bam")
+                        if sid in ctx.samples:
+                            exp[f"assigned:{sid}"] = fint(v)
+    for col, total in _column_sums(p.path("counts", "gene_count_matrix.tsv")).items():
+        exp[f"counted:{col}"] = fint(total)
+    mf = p.path("pipeline_manifest", "manifest.json")
+    if need(mf, "software versions"):
+        m = json.loads(mf.read_text())
+        for tool, v in (m.get("tool_versions") or {}).items():
+            exp[f"version:{tool}"] = v or ""
+        exp["version:R"] = m.get("r_version") or ""
+        for pkg, v in (m.get("r_packages") or {}).items():
+            exp[f"version:R:{pkg}"] = v or ""
+    return exp, problems
+
+
 # ------------------------------------------------------------------ independent report validation
 _ATTR_RE = re.compile(r"(?:href|src)='([^'#][^']*)'")
 _MARK_RE = re.compile(r"<span data-check='([^']+)'>([^<]*)</span>")
 
 
 def validate(ctx, report=None):
-    """Re-derive every checkable number in the report from the underlying files. Returns a list of problems."""
+    """Re-derive every marked number in the report from its source file. Returns a list of problems.
+
+    Marked: samples, reference, strandedness, formula, thresholds, per-contrast tested/up/down/significant, per-sample
+    input reads, alignment input and rate, primary mapped reads and %, assigned reads, counted reads, and software
+    versions. Other numbers shown (e.g. uniquely aligned %, trimming counts, QC metrics) are copied from their files
+    but not re-derived."""
     p = ctx.project
     report = Path(report or p.path("reports", "final_pipeline_report.html"))
     if not report.exists() or report.stat().st_size < 1000:
@@ -319,12 +441,15 @@ def validate(ctx, report=None):
                 "formula": str((p.state.get("design") or {}).get("formula"))}
     summ_file = p.path("results", "deseq2", "deseq2_summary.json")
     if summ_file.exists():
-        for name, c in json.loads(summ_file.read_text())["contrasts"].items():
-            cdir = Path(c["dir"])
+        for name in json.loads(summ_file.read_text())["contrasts"]:
+            cdir = p.path("results", "deseq2", name)
             for key, fname in (("up", "upregulated.tsv"), ("down", "downregulated.tsv"),
                                ("significant", "significant_results.tsv"), ("tested", "full_results.tsv")):
                 with open(cdir / fname) as fh:
                     expected[f"{key}:{name}"] = str(sum(1 for line in fh if line.strip()) - 1)
+    derived, underivable = _per_sample_expected(ctx)
+    expected.update(derived)
+    problems += underivable
     for key, want in expected.items():
         if key not in marks:
             problems.append(f"report does not show '{key}'")

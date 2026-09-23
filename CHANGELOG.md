@@ -38,6 +38,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
 * **Plot data is reconciled with the results.** Old: plots were only checked to exist. New: the data table behind
   every plot must match the result files (MA/volcano genes, values and up/down labels; heatmap gene lists and
   z-scoring; library sizes = count-matrix column sums; well-formed PCA/distance/correlation tables).
+* **More report numbers are re-checked, and the claim is exact.** Old: only samples, reference, strandedness, formula,
+  thresholds and per-contrast DE counts were re-checked, while the terminal said "every number matches". New:
+  per-sample input reads, alignment rate, primary mapped reads and %, assigned and counted reads, and software
+  versions are re-derived from the files the tools wrote; messages list what is checked. The report check also no
+  longer depends on the project's original location.
 * **The report is validated after it is written:** every link and image must exist, the document must be complete, and
   every number marked in it (samples, reference, strandedness, formula, thresholds, up/down/significant/tested per
   contrast) must equal the value re-derived from the result files.
@@ -96,7 +101,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 227 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 237 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

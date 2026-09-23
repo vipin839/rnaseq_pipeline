@@ -36,7 +36,7 @@ def check(root, deep=True):
     if rep.exists():
         probs = report_manager.validate(ctx)
         rows.append(("Report", rep.name, FAIL if probs else PASS, "; ".join(probs[:3]) or
-                     "every link resolves, every number matches the result files"))
+                     "links resolve; key numbers (samples, input reads, alignment rate, mapped reads/%, assigned and counted reads, DE counts, thresholds, versions) match their source files"))
     if p.path("pipeline_manifest", "manifest.json").exists():
         from . import manifest
         probs = manifest.problems(p)

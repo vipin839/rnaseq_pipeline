@@ -1102,7 +1102,7 @@ class ReportStage(Stage):
         if problems:
             raise PipelineError("the generated report failed validation:\n  - " + "\n  - ".join(problems),
                                 stage=self.key, remedy="re-run the report step; if it persists, report it with logs")
-        ui.ok("report validated: every link resolves and every number matches the result files")
+        ui.ok("report validated: links resolve; key numbers (samples, input reads, alignment rate, mapped reads/%, assigned and counted reads, DE counts, thresholds, versions) match their source files")
         ui.ok(f"final report: {rep}")
         return [rep] + mfiles, {}, {}
 
