@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 import sys
 
 import pytest
@@ -371,3 +372,115 @@ def test_health_check_runs_real_mini_job(tmp_path):
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
     assert "HEALTH: FAIL" not in r.stdout
     assert "200/200 read pairs assigned" in r.stdout, r.stdout[-4000:]
+
+
+# ---------------------------------------------------------------- P1/H1: DESeq2 output checked independently of R
+def _deseq2_copy(project_dir, tmp_path):
+    """Copy the finished project. The parameter file keeps the ORIGINAL absolute paths on purpose: validation must
+    re-point them to the copy (a moved project), otherwise it would check the untouched original and every tamper
+    test below would fail. Only the summary is re-pointed, so the tamper helpers edit the copy."""
+    dst = _copy_project(project_dir, tmp_path)
+    path = dst / "results" / "deseq2" / "deseq2_summary.json"
+    path.write_text(path.read_text().replace(str(project_dir), str(dst)))
+    params = json.loads((dst / "results" / "deseq2" / "deseq2_params.json").read_text())
+    assert str(project_dir) in params["counts"]
+    return dst, params
+
+
+def _read_tsv(path):
+    lines = path.read_text().splitlines()
+    head = lines[0].split("\t")
+    return head, [dict(zip(head, l.split("\t"))) for l in lines[1:] if l.strip()]
+
+
+def _write_tsv(path, head, rows):
+    path.write_text("\t".join(head) + "\n" + "".join("\t".join(r[h] for h in head) + "\n" for r in rows))
+
+
+def _flip_direction(dst):
+    """What a swapped baseline looks like: every fold change negated, up and down exchanged, all tables and the
+    summary rewritten consistently (the existing threshold checks alone cannot notice)."""
+    sfile = dst / "results" / "deseq2" / "deseq2_summary.json"
+    summary = json.loads(sfile.read_text())
+    params = json.loads((dst / "results" / "deseq2" / "deseq2_params.json").read_text())
+    a, t = params["alpha"], params["log2fc_threshold"]
+    for c in summary["contrasts"].values():
+        cdir = Path(c["dir"])
+        head, rows = _read_tsv(cdir / "full_results.tsv")
+        for r in rows:
+            for k in ("log2FoldChange", "log2FoldChange_shrunk", "stat"):
+                if k in r and r[k] not in ("NA", ""):
+                    r[k] = repr(-float(r[k]))
+            if r["regulation"] in ("up", "down"):
+                r["regulation"] = {"up": "down", "down": "up"}[r["regulation"]]
+        _write_tsv(cdir / "full_results.tsv", head, rows)
+        sig = [r for r in rows if r["regulation"] != "ns"]
+        up = [r for r in sig if r["regulation"] == "up"]
+        down = [r for r in sig if r["regulation"] == "down"]
+        for name, sel in (("significant_results", sig), ("upregulated", up), ("downregulated", down),
+                          ("top_upregulated", up[:params["top_n_genes"]]),
+                          ("top_downregulated", down[:params["top_n_genes"]])):
+            _write_tsv(cdir / f"{name}.tsv", head, sel)
+        c["up"], c["down"] = len(up), len(down)
+    sfile.write_text(json.dumps(summary))
+    assert a and t is not None
+
+
+def _drop_one_gene(dst):
+    sfile = dst / "results" / "deseq2" / "deseq2_summary.json"
+    summary = json.loads(sfile.read_text())
+    gone = None
+    for c in summary["contrasts"].values():
+        head, rows = _read_tsv(Path(c["dir"]) / "full_results.tsv")
+        gone = gone or next(r["gene_id"] for r in reversed(rows) if r["regulation"] == "ns")
+        _write_tsv(Path(c["dir"]) / "full_results.tsv", head, [r for r in rows if r["gene_id"] != gone])
+        c["genes_tested"] -= 1
+    nc = dst / "results" / "deseq2" / "normalized_counts.tsv"
+    head, rows = _read_tsv(nc)
+    _write_tsv(nc, head, [r for r in rows if r["gene_id"] != gone])
+    summary["genes_tested"] -= 1
+    sfile.write_text(json.dumps(summary))
+
+
+def _edit_first_contrast(dst, fn):
+    summary = json.loads((dst / "results" / "deseq2" / "deseq2_summary.json").read_text())
+    path = Path(next(iter(summary["contrasts"].values()))["dir"]) / "full_results.tsv"
+    head, rows = _read_tsv(path)
+    fn(rows)
+    _write_tsv(path, head, rows)
+
+
+def _scale_first_size_factor(dst):
+    f = dst / "results" / "deseq2" / "size_factors.tsv"
+    head, rows = _read_tsv(f)
+    rows[0]["size_factor"] = repr(float(rows[0]["size_factor"]) * 1.1)
+    _write_tsv(f, head, rows)
+
+
+def _double_a_basemean(rows):
+    rows[-1]["baseMean"] = repr(float(rows[-1]["baseMean"]) * 2)
+
+
+def _padj_below_pvalue(rows):
+    r = next(r for r in reversed(rows) if r["regulation"] == "ns" and r["pvalue"] not in ("NA", "")
+             and float(r["pvalue"]) > 0.2)
+    r["padj"] = repr(float(r["pvalue"]) / 2)      # still not significant, so the threshold checks cannot notice
+
+
+@pytest.mark.parametrize("tamper,expect", [
+    (_flip_direction, "direction"),
+    (_drop_one_gene, "low-count filter"),
+    (_scale_first_size_factor, "size factor"),
+    (lambda d: _edit_first_contrast(d, _double_a_basemean), "baseMean"),
+    (lambda d: _edit_first_contrast(d, _padj_below_pvalue), "padj"),
+], ids=["direction-swapped", "gene-dropped", "size-factor", "baseMean", "padj-below-pvalue"])
+def test_deseq2_output_rederived_independently(project, tmp_path, tamper, expect):
+    from rnaseq_pipeline import PipelineError, r_bridge
+    from rnaseq_pipeline.project import Project
+    p, _, _ = project
+    dst, params = _deseq2_copy(p, tmp_path)
+    assert r_bridge.validate_outputs(Project.open(dst), params)      # untouched copy passes
+    tamper(dst)
+    with pytest.raises(PipelineError) as e:
+        r_bridge.validate_outputs(Project.open(dst), params)
+    assert expect in str(e.value), str(e.value)

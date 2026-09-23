@@ -29,6 +29,12 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   count-matrix column sum must equal featureCounts `Assigned`. A mismatch stops the stage.
 * **DESeq2 output completeness.** The up/down/significant tables are re-derived from the full result table; missing or
   extra genes, or wrong labels, stop the stage (previously only listed genes were checked).
+* **DESeq2 results are re-derived without trusting R.** Old: R's output was checked against R's own summary, so a
+  swapped baseline (every fold change reversed) or a silently dropped gene passed. New: Python recomputes the
+  filtered gene set, size factors, normalized counts and baseMean from the count matrix, checks p-value ranges, and
+  checks every contrast's direction against the group means. Reason: an independent layer must not depend on the
+  component it checks. Consequence: inconsistent results stop the DESeq2 stage, and resume or `--validate-project`
+  marks them INVALID. Recorded paths are re-pointed when a project has been moved.
 * **The report is validated after it is written:** every link and image must exist, the document must be complete, and
   every number marked in it (samples, reference, strandedness, formula, thresholds, up/down/significant/tested per
   contrast) must equal the value re-derived from the result files.
@@ -71,7 +77,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 211 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 216 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

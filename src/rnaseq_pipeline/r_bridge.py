@@ -59,8 +59,22 @@ EXPECTED = ["full_results.tsv", "significant_results.tsv", "upregulated.tsv", "d
             "top_upregulated.tsv", "top_downregulated.tsv", "statistics.txt"]
 
 
+def relocate(params, project):
+    """The parameter file records absolute paths; re-point them to where the project is now (moved or copied)."""
+    old_root = Path(params["out_dir"]).parents[1]
+    new = dict(params)
+    for k in ("counts", "metadata", "out_dir", "plot_dir", "table_dir"):
+        if params.get(k):
+            try:
+                new[k] = str(project.root / Path(params[k]).relative_to(old_root))
+            except ValueError:
+                pass  # outside the project: keep as recorded
+    return new
+
+
 def validate_outputs(project, params):
     """Check R outputs structurally and for internal consistency. Returns summary dict."""
+    params = relocate(params, project)
     out_dir = Path(params["out_dir"])
     sfile = out_dir / "deseq2_summary.json"
     if not sfile.exists():
@@ -77,7 +91,8 @@ def validate_outputs(project, params):
     if len(summary["contrasts"]) != len(params["contrasts"]):
         problems.append("number of contrast results differs from requested contrasts")
     for name, c in summary["contrasts"].items():
-        cdir = Path(c["dir"])
+        cdir = out_dir / name
+        c["dir"] = str(cdir)
         for f in EXPECTED:
             if not (cdir / f).exists():
                 problems.append(f"{name}: missing {f}")
@@ -103,9 +118,140 @@ def validate_outputs(project, params):
         for f in (files if isinstance(files, list) else [files]):
             if not Path(f).exists():
                 problems.append(f"QC plot missing: {f}")
+    if not problems:
+        problems += independent_checks(params, summary)
     if problems:
-        raise PipelineError("DESeq2 output validation failed:\n  - " + "\n  - ".join(problems), stage="deseq2")
+        raise PipelineError("DESeq2 output validation failed:\n  - " + "\n  - ".join(problems), stage="deseq2",
+                            cause="the R results are inconsistent with the count matrix and design they were "
+                                  "computed from (R/DESeq2 malfunction, or result files edited afterwards)",
+                            remedy="re-run the DESeq2 stage; if it repeats, report it with logs/deseq2/")
     return summary
+
+
+# ---------------------------------------------------------------- independent re-derivation (no trust in R)
+SIZE_FACTOR_RTOL = 1e-6
+DIRECTION_MIN_AGREEMENT = 0.9   # a correct contrast agrees on ~100% of strong genes; a swapped one on ~0%
+DIRECTION_MIN_GENES = 5
+
+
+def _matrix(path):
+    with open(path) as f:
+        samples = f.readline().rstrip("\n").split("\t")[1:]
+        rows = {}
+        for line in f:
+            if line.strip():
+                parts = line.rstrip("\n").split("\t")
+                rows[parts[0]] = [float(x) for x in parts[1:]]
+    return samples, rows
+
+
+def _median(v):
+    v = sorted(v)
+    n = len(v)
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+
+def independent_checks(params, summary):
+    """Recompute from the count matrix and the metadata what DESeq2 must have produced, and compare:
+
+    * the genes tested = the genes passing the documented low-count filter (none dropped, none added),
+    * size factors = median-of-ratios on those genes; normalized counts = counts / size factor,
+    * baseMean = mean of the normalized counts; p-values and padj within [0, 1] and padj >= pvalue,
+    * the direction of every contrast: log2FC of strong genes has the sign of log2(mean numerator group /
+      mean denominator group) of the normalized counts (a swapped baseline flips it).
+    """
+    import math
+    problems = []
+    out_dir = Path(params["out_dir"])
+    samples, counts = _matrix(params["counts"])
+    meta = {r["sample"]: r for r in _rows(params["metadata"])}
+    voi = params["variable_of_interest"]
+    groups = {}
+    for s in samples:
+        groups.setdefault(meta[s][voi], []).append(s)
+    mcf = params["min_count_filter"]
+    min_samples = (min(len(v) for v in groups.values()) if mcf["min_samples"] == "smallest_group"
+                   else int(mcf["min_samples"]))
+    kept = {g for g, v in counts.items() if sum(x >= mcf["min_count"] for x in v) >= min_samples}
+
+    nsamples, norm = _matrix(out_dir / "normalized_counts.tsv")
+    if nsamples != samples:
+        return [f"normalized counts samples {nsamples} differ from the count matrix {samples}"]
+    for label, genes in [("normalized counts", set(norm))] + [
+            (f"{n}: full_results", {r["gene_id"] for r in _rows(Path(c["dir"]) / "full_results.tsv")})
+            for n, c in summary["contrasts"].items()]:
+        if genes != kept:
+            problems.append(f"{label} does not match the low-count filter (>= {mcf['min_count']} reads in >= "
+                            f"{min_samples} samples): {len(kept - genes)} gene(s) missing, "
+                            f"{len(genes - kept)} unexpected (e.g. {sorted((kept - genes) | (genes - kept))[:3]})")
+    if problems:
+        return problems
+
+    # size factors: median of ratios over genes without zeros (DESeq2's default estimator)
+    logs = {g: [math.log(x) for x in counts[g]] for g in kept if all(x > 0 for x in counts[g])}
+    sf = {r["sample"]: float(r["size_factor"]) for r in _rows(out_dir / "size_factors.tsv")}
+    if not logs:
+        problems.append("no gene without zero counts: size factors cannot be verified")
+    else:
+        for j, s in enumerate(samples):
+            expected = math.exp(_median([v[j] - sum(v) / len(v) for v in logs.values()]))
+            if s not in sf or abs(sf[s] - expected) > SIZE_FACTOR_RTOL * expected:
+                problems.append(f"size factor of {s} is {sf.get(s)}, median-of-ratios gives {expected:.6g}")
+    if problems:
+        return problems
+    worst = max(abs(norm[g][j] - counts[g][j] / sf[s]) for g in kept for j, s in enumerate(samples))
+    if worst > 1e-3:
+        problems.append(f"normalized counts differ from counts / size factor (max difference {worst:.3g})")
+
+    for name, c in summary["contrasts"].items():
+        full = _rows(Path(c["dir"]) / "full_results.tsv")
+        ids = [r["gene_id"] for r in full]
+        if len(ids) != len(set(ids)):
+            problems.append(f"{name}: gene IDs repeated in full_results")
+        bad_bm, bad_p = [], []
+        for r in full:
+            g, bm = r["gene_id"], _num(r.get("baseMean"))
+            mean = sum(norm[g]) / len(norm[g])
+            if bm is None or abs(bm - mean) > 1e-3 + 1e-6 * mean:
+                bad_bm.append(g)
+            pv, pa = _num(r.get("pvalue")), _num(r.get("padj"))
+            if any(x is not None and not 0 <= x <= 1 for x in (pv, pa)) or (
+                    pv is not None and pa is not None and pa < pv * (1 - 1e-9)):
+                bad_p.append(g)
+        if bad_bm:
+            problems.append(f"{name}: baseMean is not the mean of the normalized counts for {len(bad_bm)} "
+                            f"gene(s) (e.g. {bad_bm[:3]})")
+        if bad_p:
+            problems.append(f"{name}: pvalue/padj outside [0, 1] or padj < pvalue for {len(bad_p)} gene(s) "
+                            f"(e.g. {bad_p[:3]})")
+        num, den = _contrast_levels(params, name)
+        if num is None:
+            problems.append(f"{name}: not one of the requested contrasts")
+            continue
+        agree = total = 0
+        for r in full:
+            lfc, pa = _num(r.get("log2FoldChange")), _num(r.get("padj"))
+            if lfc is None or pa is None or pa >= params["alpha"] or abs(lfc) < 1:
+                continue
+            g = r["gene_id"]
+            m_num = sum(norm[g][samples.index(s)] for s in groups[num]) / len(groups[num])
+            m_den = sum(norm[g][samples.index(s)] for s in groups[den]) / len(groups[den])
+            total += 1
+            agree += (m_num > m_den) == (lfc > 0)
+        if total >= DIRECTION_MIN_GENES and agree / total < DIRECTION_MIN_AGREEMENT:
+            problems.append(f"{name}: direction check failed — only {agree} of {total} significant genes have a "
+                            f"log2FC sign matching mean({num}) vs mean({den}) of the normalized counts "
+                            "(numerator and baseline appear swapped)")
+        c["direction_check"] = {"genes": total, "agreeing": agree}
+    return problems
+
+
+def _contrast_levels(params, name):
+    voi = params["variable_of_interest"]
+    for num, den in params["contrasts"]:
+        if name == f"{voi}_{num}_vs_{den}":
+            return num, den
+    return None, None
 
 
 def _num(v):

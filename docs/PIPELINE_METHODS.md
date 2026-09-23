@@ -151,6 +151,14 @@ of freedom. The design is re-checked in R (`--validate-only`) before being confi
 8. Python then validates the outputs: every file exists, the table sizes match the summary, and the up, down and
    significant sets are **re-derived from the full result table** (padj < alpha and |log2FC| ≥ threshold, direction by sign).
    A gene missing from or wrongly added to a table, or labelled with the wrong direction, stops the stage.
+9. Python also **recomputes, without trusting R**, what DESeq2 must have produced from the count matrix and the
+   metadata: the tested genes must be exactly the genes passing the low-count filter; the size factors must equal
+   DESeq2's median-of-ratios estimate (relative tolerance 1e-6) and the normalized counts must equal
+   counts / size factor; `baseMean` must be the mean of the normalized counts; p-values and padj must lie in [0, 1]
+   with padj ≥ p-value; and for every contrast at least 90% of the significant genes with |log2FC| ≥ 1 must have
+   a fold-change sign that matches mean(numerator group) vs mean(baseline group) of the normalized counts (a
+   swapped baseline gives ~0%; checked when there are at least 5 such genes). The same checks run again on resume
+   and in `--validate-project`, with the recorded paths re-pointed if the project was moved.
 
 ## 15. Optional enrichment
 If enabled and the packages are installed: clusterProfiler `enrichGO` (BP) and ReactomePA `enrichPathway` (human/mouse) on the up

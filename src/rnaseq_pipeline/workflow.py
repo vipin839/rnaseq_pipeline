@@ -1074,6 +1074,19 @@ class DESeq2Stage(Stage):
         return outs, {"params": params}, {"contrasts": {n: {k: c[k] for k in ("significant", "up", "down")}
                                                         for n, c in summary["contrasts"].items()}}
 
+    def revalidate(self, ctx, data):
+        """Re-derive the DESeq2 results from the count matrix and design again (r_bridge.independent_checks)."""
+        pf = ctx.project.path("results", "deseq2", "deseq2_params.json")
+        try:
+            params = json.loads(pf.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return [f"DESeq2 parameter file unreadable: {e}"]
+        try:
+            r_bridge.validate_outputs(ctx.project, params)
+        except PipelineError as e:
+            return [str(e).replace("\n  - ", "; ")]
+        return []
+
 
 class ReportStage(Stage):
     key, title, depends = "report_generated", "FINAL REPORT + MANIFEST", ("deseq2_completed",)
