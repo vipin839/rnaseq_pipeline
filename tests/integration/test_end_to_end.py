@@ -958,3 +958,35 @@ def test_setting_added_in_a_later_version_does_not_invalidate(project, tmp_path)
     # but a recorded value that differs from the current one is still a change
     status, _ = _status_after(p, tmp_path / "b", lambda q: _set(q, "hisat2_parameters.no_mixed", True))
     assert status["alignment_completed"] != "VALID"
+
+
+# ---------------------------------------------------------------- P1/M7: per-area project health
+AREAS = ["SYSTEM", "INSTALLATION", "CONFIGURATION", "DATA", "REFERENCE", "QC", "ALIGNMENT", "QUANTIFICATION",
+         "DESIGN", "DESEQ2 + RESULTS", "REPORT", "SECURITY", "RESUME", "SCIENTIFIC VALIDATION"]
+
+
+def _area_summary(out):
+    import re
+    block = out[out.index("AREA SUMMARY"):]
+    return {a: re.search(rf"^\s*{re.escape(a)}\s+(PASS|WARNING|FAIL)\b", block, re.M).group(1) for a in AREAS}
+
+
+def test_project_health_reports_every_area(project, tmp_path):
+    p, _, cfg = project
+    r = run_cli(["--config", str(cfg), "--validate-project", str(_copy_project(p, tmp_path))], [], timeout=600)
+    assert r.returncode == 0, r.stdout[-3000:]
+    assert all(v == "PASS" for v in _area_summary(r.stdout).values()), _area_summary(r.stdout)
+    assert "BLOCKING ISSUES: none" in r.stdout
+
+
+def test_project_health_blocking_issue_named(project, tmp_path):
+    p, _, cfg = project
+    dst = _copy_project(p, tmp_path)
+    m = dst / "counts" / "gene_count_matrix.tsv"
+    m.write_text(m.read_text().replace("\t", "\t1", 1))
+    r = run_cli(["--config", str(cfg), "--validate-project", str(dst)], [], timeout=600)
+    s = _area_summary(r.stdout)
+    assert r.returncode == 1 and s["QUANTIFICATION"] == "FAIL" and s["SCIENTIFIC VALIDATION"] == "FAIL", s
+    assert s["DATA"] == "PASS" and s["ALIGNMENT"] == "PASS"                  # upstream areas unaffected
+    blocking = r.stdout[r.stdout.index("BLOCKING ISSUES"):]
+    assert "GENE COUNT MATRIX" in blocking.split("NON-BLOCKING")[0], blocking[:800]

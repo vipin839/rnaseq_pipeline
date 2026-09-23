@@ -56,6 +56,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
 * **Pre-flight checks:** required tools per stage before it starts; RAM before alignment (with an explanation and a
   choice); more than one organism in a project is refused; Rscript is required before the design stage.
 * Decision screens (quality gate, trimming, strandedness, design) show WHAT / WHY / OPTIONS / CONSEQUENCE.
+* **Per-area project health.** `--validate-project` (and main menu 3) now groups every check into areas — system,
+  installation, configuration, data, reference, QC, alignment, quantification, design, DESeq2 + results, report,
+  security, resume — prints an area summary plus a scientific-validation area that fails if any scientific area
+  fails, and lists BLOCKING (FAIL) and NON-BLOCKING (WARNING) issues. Missing tools are a non-blocking warning (the
+  results stay valid; the tools are needed only to continue).
 * **Aligner status is shown and enforced.** A new project shows every aligner with its real status (HISAT2:
   supported and validated; STAR: not available — planned, not implemented or validated) and whether it is installed.
   The new setting `aligner` accepts only `hisat2` (anything else is refused with the reason) and is recorded with the
@@ -134,7 +139,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 260 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 262 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

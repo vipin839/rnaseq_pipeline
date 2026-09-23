@@ -110,8 +110,11 @@ and any folder containing a FASTA + GTF pair as `[needs index]`.
 rnaseq-pipeline --validate-project ~/rnaseq_projects/RNAseq_MyStudy
 ```
 
-It re-hashes every recorded output, re-runs the integrity checks (for example BAM quickcheck), re-checks the report
-against the result files and the manifest for completeness, and looks for stored credentials. The result is
+It re-hashes every recorded output, re-runs the integrity checks (for example BAM quickcheck and the independent
+DESeq2 re-derivation), re-checks the report against the result files and the manifest for completeness, checks the
+installed tools, and looks for stored credentials. It ends with an **area summary** (system, installation,
+configuration, data, reference, QC, alignment, quantification, design, DESeq2 + results, report, security, resume,
+scientific validation) and the lists of **blocking** and **non-blocking** issues. The result is
 `PROJECT HEALTH: PASS`, `WARNING` (for example not finished yet; the next step is named) or `FAIL` (stages that
 will re-run when you resume). The menu version can optionally re-read every FASTQ file.
 
