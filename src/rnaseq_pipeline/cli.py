@@ -1065,7 +1065,11 @@ def main(argv=None):
         return 1
     try:
         if args.runtime_env:
-            print(environment_manager.ENV_FILES[args.runtime_env])
+            path, changes = environment_manager.env_file(args.runtime_env)
+            if changes:  # on stderr, so that "$(rnaseq-pipeline --runtime-env tools)" still captures only the path
+                print(f"note: this CPU lacks AVX2/BMI2; using a compatible environment file ({'; '.join(changes)})",
+                      file=sys.stderr)
+            print(path)
             return 0
         if args.check:
             rep = doctor.run(app.cfg, app.envs, app.projects_dir, app.config_sources, quick=args.quick)

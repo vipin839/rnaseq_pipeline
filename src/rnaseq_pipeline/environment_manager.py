@@ -4,10 +4,55 @@ import platform
 import shutil
 from pathlib import Path
 
-from . import PACKAGE_DIR, runner, ui
+import yaml
+
+from . import PACKAGE_DIR, USER_STATE_DIR, runner, system_check, ui
 
 ENV_FILES = {"tools": PACKAGE_DIR / "envs" / "rnaseq-tools.yml",
              "r": PACKAGE_DIR / "envs" / "rnaseq-r.yml"}
+
+
+def _package_name(spec):
+    for i, ch in enumerate(spec):
+        if ch in "=<>! ":
+            return spec[:i]
+    return spec
+
+
+def env_file(key, missing_cpu_features=None):
+    """(path, changes): the environment file to create `key` from, adapted to this processor.
+
+    Some tools' current Bioconda builds need x86-64-v3 instructions (AVX2/BMI2) and are killed with SIGILL on older
+    CPUs, and conda cannot tell (the packages do not declare it). On such a CPU the tools are pinned to the newest
+    version whose build runs there (dependency_manager.OLD_CPU_VERSIONS). The adapted copy is written to the user
+    state directory; the installed package directory is never written to. `changes` lists "old -> new" specs.
+    """
+    from .dependency_manager import OLD_CPU_VERSIONS
+    shipped = ENV_FILES[key]
+    missing = system_check.missing_x86_64_v3() if missing_cpu_features is None else missing_cpu_features
+    if not missing:
+        return shipped, []
+    spec = yaml.safe_load(shipped.read_text())
+    changes, deps = [], []
+    for d in spec.get("dependencies", []):
+        name = _package_name(d) if isinstance(d, str) else None
+        if name in OLD_CPU_VERSIONS:
+            new = f"{name}={OLD_CPU_VERSIONS[name]}"
+            if d != new:
+                changes.append(f"{d} -> {new}")
+            d = new
+        deps.append(d)
+    if not changes:
+        return shipped, []
+    spec["dependencies"] = deps
+    out = USER_STATE_DIR / "envs" / f"{shipped.stem}.cpu-compatible.yml"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    header = (f"# Generated from {shipped.name} for a CPU without {', '.join(missing)}.\n"
+              f"# Changed: {'; '.join(changes)} (the newer builds need AVX2/BMI2 and would crash with SIGILL).\n")
+    tmp = out.with_suffix(".yml.part")
+    tmp.write_text(header + yaml.safe_dump(spec, sort_keys=False))
+    os.replace(tmp, out)
+    return out, changes
 
 
 def rscript_on_path():
@@ -83,7 +128,7 @@ class Environments:
     # ---------- creation / installation ----------
     def create_commands(self, key):
         exe = self.conda_bin()
-        return [str(exe), "env", "create", "-y", "-n", self.names[key], "-f", str(ENV_FILES[key])]
+        return [str(exe), "env", "create", "-y", "-n", self.names[key], "-f", str(env_file(key)[0])]
 
     def install_commands(self, key, packages):
         exe = self.conda_bin()

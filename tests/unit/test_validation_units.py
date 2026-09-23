@@ -634,3 +634,40 @@ def test_pipeline_command_killed_by_sigill_is_explained(tmp_path):
     with pytest.raises(PipelineError) as e:
         runner.run([str(tool)], stage="stringtie")
     assert "SIGILL" in str(e.value) and "--check" in e.value.remedy
+
+
+# ---------------------------------------------------------------- P0/C1: CPU-aware runtime environment
+@pytest.fixture
+def old_cpu(tmp_path, monkeypatch):
+    from rnaseq_pipeline import environment_manager as EM
+    monkeypatch.setattr(EM.system_check, "missing_x86_64_v3", lambda *a, **k: ["AVX2", "BMI2"])
+    monkeypatch.setattr(EM, "USER_STATE_DIR", tmp_path / "state")
+    return EM
+
+
+def test_tools_env_for_old_cpu_pins_compatible_stringtie(old_cpu):
+    import yaml
+    path, changes = old_cpu.env_file("tools")
+    assert path.parent == old_cpu.USER_STATE_DIR / "envs"          # never written into the package
+    deps = yaml.safe_load(path.read_text())["dependencies"]
+    assert "stringtie=2.2.3" in deps and not any(d.startswith("stringtie>") for d in deps)
+    shipped = yaml.safe_load(old_cpu.ENV_FILES["tools"].read_text())["dependencies"]
+    assert [d for d in deps if not d.startswith("stringtie")] == [d for d in shipped if not d.startswith("stringtie")]
+    assert changes == ["stringtie>=2.2 -> stringtie=2.2.3"]
+
+
+def test_env_file_unchanged_on_modern_cpu_and_for_r(old_cpu, monkeypatch):
+    assert old_cpu.env_file("r") == (old_cpu.ENV_FILES["r"], [])     # no R package needs a newer CPU
+    monkeypatch.setattr(old_cpu.system_check, "missing_x86_64_v3", lambda *a, **k: [])
+    assert old_cpu.env_file("tools") == (old_cpu.ENV_FILES["tools"], [])
+
+
+def test_create_and_runtime_env_use_the_compatible_file(old_cpu, capsys):
+    from rnaseq_pipeline import cli
+    envs = old_cpu.Environments({"environment": {}})
+    cmd = envs.create_commands("tools")
+    assert cmd[cmd.index("-f") + 1].endswith("rnaseq-tools.cpu-compatible.yml")
+    assert cli.main(["--runtime-env", "tools"]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip().endswith("rnaseq-tools.cpu-compatible.yml")   # stdout: only the path
+    assert "stringtie=2.2.3" in out.err                                   # explanation on stderr

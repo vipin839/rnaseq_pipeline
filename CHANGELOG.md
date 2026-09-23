@@ -65,9 +65,13 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   (`stringtie=2.2.3`, whose build uses no AVX2/BMI2 instructions); main menu 4 proposes that version, and a
   pipeline step killed by SIGILL says so. StringTie only produces the transcript TPM tables; the DESeq2 input
   (featureCounts) is unaffected. The installed StringTie version is recorded in each project, as before.
+* **Creating the tools environment on an older CPU** installed StringTie 3.x, which then crashed. Now
+  `--runtime-env tools` and main menu 4 give such CPUs an adapted copy of the environment file (in
+  `~/.rnaseq_pipeline/envs/`) that pins `stringtie=2.2.3`; the shipped file is unchanged and still used on
+  modern CPUs.
 
 ### Tests
-* 208 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 211 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).
