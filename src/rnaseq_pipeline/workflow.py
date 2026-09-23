@@ -352,7 +352,8 @@ def run_qc(ctx, stage, trimmed):
     if not ctx.dry_run:
         qc_manager.validate_fastqc(files, fq_dir, expected, stage)
     inputs = [fq_dir] + ([p.path("qc", "fastp")] if trimmed else [])
-    qc_manager.run_multiqc(inputs, mq_dir, f"{p.name}: {sub} reads", ctx.log(stage), stage)
+    qc_manager.run_multiqc(inputs, mq_dir, f"{p.name}: {sub} reads", ctx.log(stage), stage,
+                           expected_sources=[fq_dir / f"{qc_manager.fastqc_basename(f)}.zip" for f in files])
     if ctx.dry_run:
         return [], {}, {}
     return [fq_dir, mq_dir], {"samples": ctx.samples}, {"files": len(files)}
@@ -703,7 +704,9 @@ class BamQCStage(Stage):
                                             ctx.log("bam_qc", sid))
         mq = p.path("qc", "multiqc_alignment")
         qc_manager.run_multiqc([p.path("alignment", "reports"), p.path("qc", "fastqc_raw")], mq,
-                               f"{p.name}: alignment QC", ctx.log("bam_qc"), self.key)
+                               f"{p.name}: alignment QC", ctx.log("bam_qc"), self.key,
+                               expected_sources=files + [p.path("alignment", "reports", f"{sid}.hisat2.summary")
+                                                         for sid in ctx.samples])
         if ctx.dry_run:
             return [], {}, {}
         comb = p.path("alignment", "reports", "bam_qc_summary.tsv")

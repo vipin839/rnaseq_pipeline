@@ -25,6 +25,7 @@ positives, 58 genes tested, 16 checkpoints**. This is the reference outcome ever
 | 1 | One organism per project | `data_manager.show_public` | none | **RISK** — mixed organisms only warned, can be registered (F11) | VERIFIED (F11 fixed) — `unit::test_mixed_organisms_refused` |
 | 2 | FASTQ structure/alphabet/lengths/gzip/mates | `fastq_validator` | 14 unit | VERIFIED | VERIFIED — unit FASTQ-validator tests |
 | 2 | Validation interruptible (Ctrl-C/SIGTERM) | `fastq_validator.validate_many` | none | RISK — ProcessPool waits for workers (F2) | VERIFIED (F2 fixed) — `failure::test_fastq_validation_pool_stops_on_interrupt` (fails without the fix) |
+| 3 | FastQC report belongs to its file; MultiQC includes every input (plan M2) | `qc_manager.fastqc_problem`, `run_multiqc(expected_sources)` | none | **GAP** — count-only / exit-code-only | VERIFIED (fixed) — `integration::test_fastqc_report_must_belong_to_its_file`, `test_multiqc_must_include_every_input` (fail without the fix) |
 | 3 | FastQC count == FASTQ count (layer 2) | `qc_manager.validate_fastqc` | integration | VERIFIED | VERIFIED — integration `test_trimming_and_qc` |
 | 4 | Advisory gate, user decides, thresholds in config | `quality_assessment`, `QualityGateStage` | integration | VERIFIED; explanation of decision minimal (F12) | VERIFIED (F12 fixed: WHAT/WHY/OPTIONS/CONSEQUENCE) — integration |
 | 5 | fastp output re-validated; counts == fastp JSON | `TrimmingStage` | integration | VERIFIED | VERIFIED — integration |

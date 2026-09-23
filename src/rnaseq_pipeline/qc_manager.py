@@ -44,33 +44,41 @@ def fastqc_total_sequences(data_text):
     return int(m.group(1)) if m else None
 
 
-def fastqc_ok(fastq, out_dir, expected_reads=None):
+def fastqc_problem(fastq, out_dir, expected_reads=None):
+    """Why the FastQC report of `fastq` is not acceptable, or None. The report must be complete, belong to THIS
+    file (FastQC records the file name it analysed) and count the reads the FASTQ validation counted."""
     base = fastqc_basename(fastq)
     html, z = Path(out_dir) / f"{base}.html", Path(out_dir) / f"{base}.zip"
     if not html.exists() or html.stat().st_size == 0 or not z.exists():
-        return False
+        return "report missing"
     try:
         _, data = read_fastqc_zip(z)
     except (zipfile.BadZipFile, ValueError, OSError):
-        return False
+        return "report unreadable"
     if ">>END_MODULE" not in data:
-        return False
+        return "report incomplete"
+    m = re.search(r"^Filename\t(.+)$", data, re.M)
+    if not m or m.group(1).strip() != Path(fastq).name:
+        return f"report belongs to {m.group(1).strip() if m else 'an unknown file'}, not {Path(fastq).name}"
     n = fastqc_total_sequences(data)
     if n is None or n == 0:
-        return False
+        return "report counts no reads"
     if expected_reads is not None and n != expected_reads:
-        return False
-    return True
+        return f"read count {n} != {expected_reads} from FASTQ validation"
+    return None
+
+
+def fastqc_ok(fastq, out_dir, expected_reads=None):
+    return fastqc_problem(fastq, out_dir, expected_reads) is None
 
 
 def validate_fastqc(files, out_dir, expected_reads, stage):
     """expected_reads: {fastq_path_str: reads}. Raises PipelineError on any invalid report."""
     problems = []
     for f in files:
-        exp = expected_reads.get(str(f))
-        if not fastqc_ok(f, out_dir, exp):
-            problems.append(f"{Path(f).name}: FastQC report missing/invalid"
-                            + (f" or read count != {exp}" if exp else ""))
+        why = fastqc_problem(f, out_dir, expected_reads.get(str(f)))
+        if why:
+            problems.append(f"{Path(f).name}: FastQC {why}")
     if problems:
         raise PipelineError("FastQC output validation failed:\n  " + "\n  ".join(problems), stage=stage,
                             cause="FastQC crashed, ran out of memory, or input changed",
@@ -85,7 +93,9 @@ MULTIQC_CONFIG = {
 }
 
 
-def run_multiqc(in_dirs, out_dir, title, log_file, stage):
+def run_multiqc(in_dirs, out_dir, title, log_file, stage, expected_sources=()):
+    """expected_sources: input files that MUST appear in the report. MultiQC skips files it cannot parse (and
+    overwrites samples with duplicate names) and still exits 0, so a sample could silently disappear."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = dict(MULTIQC_CONFIG, title=title)
@@ -103,6 +113,20 @@ def run_multiqc(in_dirs, out_dir, title, log_file, stage):
     if not report.exists() or report.stat().st_size < 1000 or data_dir is None:
         raise PipelineError("MultiQC did not produce a valid report", stage=stage,
                             remedy=f"see {log_file}")
+    if expected_sources:
+        src = data_dir / "multiqc_sources.txt"
+        seen = set()
+        if src.exists():
+            for line in src.read_text().splitlines()[1:]:
+                cells = line.split("\t")
+                if len(cells) >= 4:
+                    seen.add(str(Path(cells[3]).resolve()))
+        missing = [Path(s) for s in expected_sources if str(Path(s).resolve()) not in seen]
+        if missing:
+            raise PipelineError(f"MultiQC report is missing {len(missing)} of {len(expected_sources)} input(s): "
+                                + ", ".join(m.name for m in missing[:6]), stage=stage,
+                                cause="MultiQC skips files it cannot parse, and overwrites samples with the same name",
+                                remedy=f"see {log_file}; re-run the step (the listed files may be damaged)")
     gs = next((p for p in data_dir.glob("multiqc_general_stats.txt")), None)
     summary = {"title": title, "inputs": [str(d) for d in in_dirs], "report": str(report),
                "data_dir": str(data_dir), "general_stats_rows": 0}

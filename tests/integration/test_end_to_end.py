@@ -874,3 +874,38 @@ def test_read_only_project_is_explained_not_a_traceback(project, tmp_path):
     out = r.stdout + r.stderr
     assert "Traceback" not in out and "read-only" in out and "--validate-project" in out, out[-2000:]
     assert check.returncode == 0 and "PROJECT HEALTH: PASS" in check.stdout     # checking needs no writes
+
+
+# ---------------------------------------------------------------- P1/M2: QC reports complete and for the right files
+def test_fastqc_report_must_belong_to_its_file(project, tmp_path):
+    """All synthetic samples have the same read count, so a report of another file passes a count check."""
+    import shutil as sh
+    from rnaseq_pipeline import PipelineError, qc_manager
+    p, _, _ = project
+    d = tmp_path / "fastqc"
+    sh.copytree(p / "qc" / "fastqc_raw", d)
+    fq = {s: p / "data" / "fastq" / f"{s}_R1.fastq.gz" for s in ("Ctrl1", "Ctrl2")}
+    expected = {str(f): 40000 for f in fq.values()}
+    qc_manager.validate_fastqc(list(fq.values()), d, expected, "raw_qc_completed")          # correct: passes
+    for ext in (".zip", ".html"):
+        sh.copy(d / f"Ctrl2_R1_fastqc{ext}", d / f"Ctrl1_R1_fastqc{ext}")                 # swapped report
+    with pytest.raises(PipelineError) as e:
+        qc_manager.validate_fastqc(list(fq.values()), d, expected, "raw_qc_completed")
+    assert "Ctrl1_R1" in str(e.value) and "Ctrl2_R1" in str(e.value), str(e.value)
+
+
+def test_multiqc_must_include_every_input(project, tmp_path):
+    """MultiQC skips files it cannot parse (and overwrites duplicate sample names) and still exits 0."""
+    import shutil as sh
+    from rnaseq_pipeline import PipelineError, qc_manager
+    p, _, _ = project
+    d = tmp_path / "fastqc"
+    sh.copytree(p / "qc" / "fastqc_raw", d)
+    zips = sorted(d.glob("*_fastqc.zip"))
+    qc_manager.run_multiqc([d], tmp_path / "mq_ok", "ok", tmp_path / "ok.log", "raw_qc_completed",
+                           expected_sources=zips)
+    (d / "Treat2_R1_fastqc.zip").write_bytes((d / "Treat2_R1_fastqc.zip").read_bytes()[:500])   # unreadable
+    with pytest.raises(PipelineError) as e:
+        qc_manager.run_multiqc([d], tmp_path / "mq", "t", tmp_path / "mq.log", "raw_qc_completed",
+                               expected_sources=zips)
+    assert "Treat2_R1_fastqc.zip" in str(e.value), str(e.value)

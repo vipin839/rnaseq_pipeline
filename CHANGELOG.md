@@ -35,6 +35,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   checks every contrast's direction against the group means. Reason: an independent layer must not depend on the
   component it checks. Consequence: inconsistent results stop the DESeq2 stage, and resume or `--validate-project`
   marks them INVALID. Recorded paths are re-pointed when a project has been moved.
+* **QC reports must be complete and belong to the right files.** Old: FastQC reports were checked by read count
+  only (identical counts, as in balanced designs, let a report of another file pass), and MultiQC only had to exit 0
+  (it silently skips unreadable files and overwrites samples with the same name). New: each FastQC report must name
+  the FASTQ it analysed, and every expected input (FastQC reports; HISAT2 summaries and samtools outputs) must appear
+  in MultiQC's `multiqc_sources.txt`.
 * **Plot data is reconciled with the results.** Old: plots were only checked to exist. New: the data table behind
   every plot must match the result files (MA/volcano genes, values and up/down labels; heatmap gene lists and
   z-scoring; library sizes = count-matrix column sums; well-formed PCA/distance/correlation tables).
@@ -121,7 +126,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 254 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 256 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

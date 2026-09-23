@@ -35,7 +35,7 @@ Failed samples cannot proceed. The user can exclude them (they are kept on disk)
 ## 3. FastQC + MultiQC
 `fastqc --threads N --noextract`. Validation: the HTML and ZIP exist, the ZIP contains `fastqc_data.txt` and `summary.txt`,
 and **FastQC's "Total Sequences" equals the read count from step 2**. MultiQC aggregates the reports and its report and data
-folder are checked.
+folder are checked. Each report must name the FASTQ it analysed (FastQC's `Filename`), and MultiQC must list every expected input in `multiqc_sources.txt` (it silently skips unreadable files and overwrites duplicate sample names); the alignment MultiQC must likewise include every HISAT2 summary and samtools output.
 
 ## 4. Quality gate (advisory)
 Metrics are parsed from `fastqc_data.txt`. Default thresholds (`quality_gate`):
