@@ -88,7 +88,7 @@ into `samtools sort -@ N -m MEM -T temp` → `S.partial.bam`. **Every process in
 Then `samtools quickcheck`, rename to `S.sorted.bam`, `samtools index`. No SAM file is ever written.
 `--dta` is used because StringTie is downstream (it favours alignments with longer anchors).
 
-*Validation (a BAM failing any check is renamed `S.FAILED.bam` and never enters later stages):* quickcheck (EOF block),
+*Validation (a BAM failing any check is renamed `S.FAILED.bam` and never enters later stages):* quickcheck (EOF block), the index must describe this BAM (records counted by `samtools idxstats` = records in the BAM; judged by content, never by file times),
 header `SO:coordinate`, index present and newer than the BAM, `samtools flagstat`, **primary records = input reads
 (×2 for paired-end)** (HISAT2 keeps unaligned reads, so any shortfall means a truncated BAM), HISAT2's processed total =
 FASTQ read count, all primary records flagged paired (for paired-end), overall alignment rate ≥ `min_overall_alignment_rate_fail` (20 %;

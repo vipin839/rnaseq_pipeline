@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import threading
+from pathlib import Path
 import time
 
 import pytest
@@ -86,6 +87,35 @@ def test_corrupted_bam_detected(tmp_path):
     bam.write_bytes(data[: len(data) - 40])  # remove EOF block -> truncated
     ok, probs, _ = bam_manager.validate_bam(bam, 2000, paired=False)
     assert not ok and "quickcheck" in probs[0]
+
+
+def _bam(tmp_path, name, n):
+    sam = tmp_path / f"{name}.sam"
+    sam.write_text("@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:c1\tLN:5000\n"
+                   + "".join(f"r{i}\t0\tc1\t{10 + i}\t60\t10M\t*\t0\t0\tACGTACGTAC\tIIIIIIIIII\n" for i in range(n)))
+    bam = tmp_path / f"{name}.bam"
+    subprocess.run(["samtools", "view", "-b", "-o", bam, sam], check=True)
+    return bam
+
+
+@pytest.mark.skipif(not have("samtools"), reason="samtools not installed")
+def test_bam_index_judged_by_content_not_clock(tmp_path):
+    """P1/H8: the system clock can step backwards (WSL2 time sync, NTP) or files can be copied without their
+    times, so an index that merely LOOKS older must not fail a correct BAM; a stale index that LOOKS newer must."""
+    import os
+    bam = _bam(tmp_path, "x", 2000)
+    subprocess.run(["samtools", "index", bam], check=True)
+    bai = Path(str(bam) + ".bai")
+    t = bam.stat().st_mtime
+    os.utime(bai, (t - 10, t - 10))                    # observed: the clock stepped back ~1 s between the two writes
+    ok, probs, _ = bam_manager.validate_bam(bam, 2000, paired=False)
+    assert ok, probs
+    # stale: index of a 2000-record BAM next to a 1500-record BAM, with a newer timestamp
+    other = _bam(tmp_path, "y", 1500)
+    os.replace(other, bam)
+    os.utime(bai, (t + 10, t + 10))
+    ok, probs, _ = bam_manager.validate_bam(bam, 1500, paired=False)
+    assert not ok and any("index" in x and "does not match" in x for x in probs), probs
 
 
 def test_insufficient_disk(tmp_path, monkeypatch):

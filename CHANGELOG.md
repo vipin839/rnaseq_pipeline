@@ -58,6 +58,11 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **A correct BAM was rejected when the system clock stepped backwards.** Old: the BAM index was required to be
+  newer than the BAM by file time. The WSL2 clock stepped back ~1 s between writing a BAM and its index, and a
+  correct BAM was rejected ("index is older than the BAM"); conversely, a stale index with a newer time passed. New:
+  the index must describe the BAM's content — the records counted by the index (`samtools idxstats`) must equal the
+  records in the BAM (`samtools flagstat`, QC-passed + QC-failed).
 * **Report failed when the tools were not run from conda.** Old: the report always listed `environment.yml` and
   `package_versions.txt`; without a conda environment (tools on PATH, modules, containers) they cannot exist, the
   report showed "(missing)", and its validation stopped the very last stage of a finished analysis. New: the manifest
@@ -88,7 +93,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 221 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 222 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

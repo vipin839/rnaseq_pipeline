@@ -13,15 +13,35 @@ def header_sorted(bam):
     return False
 
 
-def flagstat(bam, threads=1):
+def _flagstat_json(bam, threads=1):
     out = runner.tool_output(["samtools", "flagstat", "-@", str(threads), "-O", "json", str(bam)], timeout=7200)
     if not out:
         return None
     try:
         start = out.index("{")
-        return json.loads(out[start:])["QC-passed reads"]
-    except (ValueError, KeyError, json.JSONDecodeError):
+        data = json.loads(out[start:])
+        return data if "QC-passed reads" in data else None
+    except (ValueError, json.JSONDecodeError):
         return None
+
+
+def flagstat(bam, threads=1):
+    data = _flagstat_json(bam, threads)
+    return data["QC-passed reads"] if data else None
+
+
+def idxstats_records(bam):
+    """Records counted by the INDEX (mapped + unmapped over all references), or None if it cannot be read."""
+    out = runner.tool_output(["samtools", "idxstats", str(bam)], timeout=3600)
+    if out is None:
+        return None
+    total, rows = 0, 0
+    for line in out.splitlines():
+        f = line.split("\t")
+        if len(f) == 4 and f[2].isdigit() and f[3].isdigit():   # skips samtools' warning lines on stderr
+            total += int(f[2]) + int(f[3])
+            rows += 1
+    return total if rows else None
 
 
 def validate_bam(bam, expected_input_reads, paired, threads=1):
@@ -36,15 +56,24 @@ def validate_bam(bam, expected_input_reads, paired, threads=1):
         return False, problems, m
     if not header_sorted(bam):
         problems.append("BAM header is not SO:coordinate (not sorted)")
+    full = _flagstat_json(bam, threads)
+    if full is None:
+        problems.append("samtools flagstat failed")
+        return False, problems, m
+    fs = full["QC-passed reads"]
+    records = fs["total"] + (full.get("QC-failed reads") or {}).get("total", 0)
+    # The index must describe THIS BAM. Judged by content, not by file times: the system clock can step backwards
+    # (WSL2 time sync, NTP) and copies can reset times, so "index older than BAM" is not reliable either way.
     bai = Path(str(bam) + ".bai")
     if not bai.exists():
         problems.append("BAM index (.bai) missing")
-    elif bai.stat().st_mtime < bam.stat().st_mtime:
-        problems.append("BAM index is older than the BAM")
-    fs = flagstat(bam, threads)
-    if fs is None:
-        problems.append("samtools flagstat failed")
-        return False, problems, m
+    else:
+        indexed = idxstats_records(bam)
+        if indexed is None:
+            problems.append("BAM index (.bai) cannot be read")
+        elif indexed != records:
+            problems.append(f"BAM index does not match the BAM: the index describes {indexed:,} records, the BAM "
+                            f"holds {records:,} (stale index from an earlier file)")
     primary = fs.get("primary", fs["total"] - fs.get("secondary", 0) - fs.get("supplementary", 0))
     m.update({
         "total_records": fs["total"], "primary": primary, "secondary": fs.get("secondary", 0),
