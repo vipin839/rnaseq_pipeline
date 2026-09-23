@@ -42,6 +42,28 @@ def link(report_dir, path, label=None):
     return f"<a href='{esc(rel)}'>{esc(label or p.name)}</a>"
 
 
+def _repro_list(p, R):
+    """Reproducibility files. A conda export that could not exist (tools not run from conda) is stated as such; one
+    that should exist and does not still shows as '(missing)', which fails report validation."""
+    from .manifest import CONDA_EXPORT_FILES
+    mf = p.path("pipeline_manifest", "manifest.json")
+    try:
+        conda = json.loads(mf.read_text()).get("conda_export") or {}
+    except (OSError, json.JSONDecodeError):
+        conda = {}
+    items = []
+    for f in ("manifest.json", "manifest.yaml", "environment.yml", "package_versions.txt",
+              "system_information.txt", "R_sessionInfo.txt"):
+        path = p.path("pipeline_manifest", f)
+        if f in CONDA_EXPORT_FILES and not path.exists() and conda.get("exportable") is False:
+            items.append(f"<li>{esc(f)} — not produced: {esc(conda.get('reason'))} (tool versions are recorded in "
+                         f"{link(R, p.path('logs', 'software_versions.tsv'))} and manifest.json)</li>")
+        else:
+            items.append(f"<li>{link(R, path)}</li>")
+    items.append(f"<li>{link(R, p.path('logs', 'software_versions.tsv'))}</li>")
+    return "<ul>" + "".join(items) + "</ul>"
+
+
 def tsv_table(path, max_rows=50, cols=None):
     p = Path(path)
     if not p.exists():
@@ -255,10 +277,7 @@ def generate(ctx):
         (f"<pre>{esc(chr(10).join(lines))}</pre>" if lines else "<p class='ok'>No warnings or errors were logged.</p>")
         + f"<p>{link(R, errs)} · {link(R, p.path('logs', 'pipeline.log'))} · {link(R, p.path('logs', 'command_history.log'))}</p>")
     sec("params", "Parameters", f"<pre>{esc(json.dumps(redacted(cfg), indent=2, default=str))}</pre>")
-    sec("repro", "Reproducibility",
-        "<ul>" + "".join(f"<li>{link(R, p.path('pipeline_manifest', f))}</li>" for f in
-                         ("manifest.json", "manifest.yaml", "environment.yml", "package_versions.txt",
-                          "system_information.txt", "R_sessionInfo.txt")) + "</ul>"
+    sec("repro", "Reproducibility", _repro_list(p, R) +
         f"<p>Every executed command is recorded in {link(R, p.path('logs', 'commands.jsonl'))}.</p>")
 
     nav = "".join(f"<a href='#{i}'>{esc(t)}</a>" for i, t, _ in sections)

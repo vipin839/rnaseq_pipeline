@@ -58,6 +58,12 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **Report failed when the tools were not run from conda.** Old: the report always listed `environment.yml` and
+  `package_versions.txt`; without a conda environment (tools on PATH, modules, containers) they cannot exist, the
+  report showed "(missing)", and its validation stopped the very last stage of a finished analysis. New: the manifest
+  records whether a conda export was possible (`conda_export`), and the report states "not produced" with the
+  reason and links `logs/software_versions.tsv` (tool versions are always recorded). A conda export that should
+  exist and is missing still fails validation.
 * **Intermittent HISAT2 index-build crash.** `hisat2-build` 2.2.3 crashes with SIGSEGV in about 0.6% of
   multithreaded builds (3 of 480 here; 0 of 395 single-threaded builds), which stopped the reference stage (and made
   one integration test fail intermittently). Now a crash by SIGSEGV/SIGBUS/SIGABRT discards the partial index and
@@ -82,7 +88,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 219 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 221 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

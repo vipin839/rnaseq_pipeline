@@ -10,6 +10,8 @@ from .secrets import redacted
 from . import config as C
 
 
+# written only when the tools run from conda environments (tool versions are always in "tool_versions")
+CONDA_EXPORT_FILES = ("environment.yml", "package_versions.txt")
 REQUIRED = ("tool_versions", "r_version", "input_files", "reference_checksums", "parameters", "design", "commands")
 
 
@@ -35,6 +37,14 @@ def write(ctx):
     r_info, r_pkgs = dependency_manager.detect_r(ctx.envs.rscript())
     vers = dependency_manager.write_versions(p.path("logs", "software_versions.tsv"), tools, r_info, r_pkgs)
     env_files = ctx.envs.export(out, ctx.sysinfo)
+    exe = ctx.envs.conda_bin()
+    envs_found = [k for k in ("tools", "r") if ctx.envs.prefix(k)]
+    conda_export = {
+        "exportable": bool(exe and envs_found),
+        "files": [f.name for f in env_files if f.name in CONDA_EXPORT_FILES],
+        "reason": None if exe and envs_found else
+        ("no conda/mamba executable found" if not exe else "the tools were not run from a conda environment"),
+    }
     checksums = {}
     for stage in ctx.cp.dir.glob("*.json"):
         if ".invalid." in stage.name:
@@ -68,6 +78,7 @@ def write(ctx):
                    "platform": platform.platform()},
         "r_version": r_info.get("version"),
         "tool_versions": {t["key"]: t["version"] for t in tools},
+        "conda_export": conda_export,
         "tool_paths": {t["key"]: t["path"] for t in tools},
         "r_packages": {x["package"]: x["version"] for x in r_pkgs},
         "reference": s.get("reference", {}) and {k: v for k, v in s["reference"].items() if k != "package"},

@@ -484,3 +484,36 @@ def test_deseq2_output_rederived_independently(project, tmp_path, tamper, expect
     with pytest.raises(PipelineError) as e:
         r_bridge.validate_outputs(Project.open(dst), params)
     assert expect in str(e.value), str(e.value)
+
+
+# ---------------------------------------------------------------- P1/H7: tools not run from a conda environment
+def test_report_without_conda_environment(project, tmp_path, monkeypatch):
+    """Tools on PATH (modules, containers, system packages): there is nothing to export, and the finished analysis
+    must still get a valid report that says so — not fail at the last step over a 'missing' file."""
+    from rnaseq_pipeline import environment_manager, manifest, report_manager
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    for f in ("environment.yml", "package_versions.txt"):
+        (dst / "pipeline_manifest" / f).unlink()
+    monkeypatch.setattr(environment_manager.Environments, "conda_bin", lambda self: None)
+    ctx = _ctx(dst)
+    manifest.write(ctx)
+    rep = report_manager.generate(ctx)
+    assert report_manager.validate(ctx, rep) == []
+    body = rep.read_text()
+    assert "not produced" in body and "software_versions.tsv" in body
+    assert not (dst / "pipeline_manifest" / "environment.yml").exists()
+
+
+def test_missing_conda_export_still_detected(project, tmp_path):
+    """The other side: conda WAS used, and its export later disappears -> the report must not validate."""
+    from rnaseq_pipeline import manifest, report_manager
+    p, _, _ = project
+    dst = _copy_project(p, tmp_path)
+    ctx = _ctx(dst)
+    manifest.write(ctx)
+    rep = report_manager.generate(ctx)
+    assert report_manager.validate(ctx, rep) == []
+    (dst / "pipeline_manifest" / "environment.yml").unlink()
+    rep = report_manager.generate(ctx)
+    assert any("missing" in x for x in report_manager.validate(ctx, rep))
