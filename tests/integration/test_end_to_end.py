@@ -247,6 +247,18 @@ def _set(p, key, value):
     C.save_yaml(cfg, p.config_path)
 
 
+def _edit_json(path, **changes):
+    d = json.loads(path.read_text())
+    d.update(changes)
+    path.write_text(json.dumps(d, indent=2))
+
+
+def _edit_state_strand(p, value):
+    s = json.loads(p.path("project.json").read_text())
+    s["strandedness"]["value"] = value
+    p.path("project.json").write_text(json.dumps(s, indent=2))
+
+
 STAGE_ORDER = ["data_acquired", "fastq_verified", "raw_qc_completed", "quality_assessed", "trimming_completed",
                "reference_ready", "alignment_completed", "bam_qc_completed", "strandedness_determined",
                "stringtie_completed", "featurecounts_completed", "count_matrix_completed", "design_confirmed",
@@ -273,6 +285,15 @@ STAGE_ORDER = ["data_acquired", "fastq_verified", "raw_qc_completed", "quality_a
     ("result table edited", lambda p: (lambda f: f.write_text(f.read_text() + "FAKE\t1\t5\t0\t1\t0\t0\tup\n"))(
         next(p.path("results", "deseq2").glob("*/upregulated.tsv"))), "deseq2_completed"),
     ("report deleted", lambda p: p.path("reports", "final_pipeline_report.html").unlink(), "report_generated"),
+    # P1/H4
+    ("strandedness setting changed", lambda p: _set(p, "strandedness", "forward"), "strandedness_determined"),
+    ("strandedness decision edited", lambda p: _edit_json(p.path("alignment", "reports", "strandedness.json"),
+                                                          value="forward", featurecounts_flag="1"),
+     "strandedness_determined"),
+    ("strandedness in project state edited", lambda p: _edit_state_strand(p, "forward"), "strandedness_determined"),
+    ("trimming decision setting changed", lambda p: _set(p, "trim_adapters", "never"), "quality_assessed"),
+    ("trimming decision edited", lambda p: _edit_json(p.path("qc", "assessment", "qc_decision.json"),
+                                                      decision="skip"), "quality_assessed"),
 ])
 def test_resume_invalidation_matrix(project, tmp_path, name, mutate, first_invalid):
     p, _, _ = project
@@ -292,7 +313,11 @@ def test_resume_invalidation_matrix(project, tmp_path, name, mutate, first_inval
                     "alignment_completed": ["featurecounts_completed", "count_matrix_completed", "deseq2_completed",
                                             "report_generated"],
                     "count_matrix_completed": ["design_confirmed", "deseq2_completed", "report_generated"],
-                    "design_confirmed": ["deseq2_completed", "report_generated"]}.get(first_invalid, [])
+                    "design_confirmed": ["deseq2_completed", "report_generated"],
+                    "strandedness_determined": ["stringtie_completed", "featurecounts_completed",
+                                                "count_matrix_completed", "deseq2_completed", "report_generated"],
+                    "quality_assessed": ["trimming_completed", "alignment_completed", "featurecounts_completed",
+                                         "deseq2_completed", "report_generated"]}.get(first_invalid, [])
     not_cascaded = [k for k in must_cascade if status[k] == "VALID"]
     assert not not_cascaded, f"{name}: downstream stages still VALID: {not_cascaded}"
     if name.endswith("changed"):  # a settings change must be reported as such, naming the setting
@@ -610,3 +635,122 @@ def test_report_validation_after_project_moved(project, tmp_path):
     s = dst / "results" / "deseq2" / "deseq2_summary.json"
     s.write_text(s.read_text().replace(str(p), "/nonexistent/old/location"))
     assert report_manager.validate(_ctx(dst)) == []
+
+
+def test_reference_file_change_invalidates_downstream(project, tmp_path):
+    """P1/H4: the annotation in the shared reference store changes after the analysis (edited or replaced).
+    The change is undone (bytes and time) before the test ends, so no other test sees it."""
+    import os
+    p, _, _ = project
+    cp = json.loads((p / "checkpoints" / "reference_ready.json").read_text())
+    gtf = Path(next(o["path"] for o in cp["outputs"] if o["path"].endswith("annotation.gtf")))
+    original, st = gtf.read_bytes(), gtf.stat()
+    try:
+        status, memo = _status_after(p, tmp_path, lambda _: gtf.write_bytes(original + b"# edited\n"))
+    finally:
+        gtf.write_bytes(original)
+        os.utime(gtf, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert gtf.read_bytes() == original
+    invalid = [k for k in STAGE_ORDER if status[k] != "VALID"]
+    assert invalid and invalid[0] == "reference_ready", (invalid, memo.get("reference_ready"))
+    for k in ("alignment_completed", "featurecounts_completed", "deseq2_completed", "report_generated"):
+        assert status[k] != "VALID", k
+
+
+# ---------------------------------------------------------------- P1/H4: killed during alignment, then resumed
+def _drive_cli(args, answer, env, timeout=900, kill_when=None):
+    """Run the real CLI and answer each prompt by what it says (answer(text_since_last_prompt) -> reply).
+    kill_when(): if given and true, send SIGTERM to the CLI (what closing the terminal / `kill` does)."""
+    import signal
+    import threading
+    import time
+    proc = subprocess.Popen([str(LAUNCHER), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=env)
+    out, pending = [], []
+
+    def reader():
+        while True:
+            ch = proc.stdout.read(1)
+            if not ch:
+                break
+            out.append(ch)
+            pending.append(ch)
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    deadline, killed = time.time() + timeout, False
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.05)
+        if kill_when and not killed and kill_when():
+            proc.send_signal(signal.SIGTERM)
+            killed = True
+        text = b"".join(pending).decode(errors="replace")
+        if text.endswith((": ", "]: ")) and not killed:
+            reply = answer(text)
+            pending.clear()
+            try:
+                proc.stdin.write((reply + "\n").encode())
+                proc.stdin.flush()
+            except BrokenPipeError:
+                break
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=30)
+    t.join(timeout=5)
+    return proc.returncode, b"".join(out).decode(errors="replace")
+
+
+def test_killed_during_alignment_then_resumed(project, tmp_path):
+    import shutil as sh
+    from rnaseq_pipeline import config as C
+    p, _, cfg = project
+    dst = _copy_project(p, tmp_path)
+    # a tools environment whose hisat2 waits while a flag file exists, so the kill lands mid-alignment
+    root = tmp_path / "conda"
+    tools = Path(sh.which("hisat2")).parent
+    (root / "envs" / "rnaseq-tools" / "conda-meta").mkdir(parents=True)
+    bin_dir = root / "envs" / "rnaseq-tools" / "bin"
+    bin_dir.mkdir()
+    for f in tools.iterdir():
+        (bin_dir / f.name).symlink_to(f)
+    (bin_dir / "hisat2").unlink()
+    slow, started = tmp_path / "slow", tmp_path / "started"
+    (bin_dir / "hisat2").write_text(f'#!/bin/sh\nif [ -e "{slow}" ]; then touch "{started}"; sleep 31.73; fi\n'
+                                    f'exec "{tools / "hisat2"}" "$@"\n')
+    (bin_dir / "hisat2").chmod(0o755)
+    (root / "envs" / "rnaseq-r").symlink_to(RSCRIPT.parent.parent)
+    pc = C.load_yaml(dst / "config" / "project_config.yaml")
+    C.set_value(pc, "environment.conda_root", str(root))
+    C.save_yaml(pc, dst / "config" / "project_config.yaml")
+    for f in ("Ctrl1.sorted.bam", "Ctrl1.sorted.bam.bai"):
+        (dst / "alignment" / "bam" / f).unlink()
+    env = dict(os.environ, PYTHONNOUSERSITE="1")
+    args = ["--config", str(cfg), "--project", str(dst)]
+    seen = {"menu": 0}
+
+    def answer(text):
+        if "PROJECT:" in text and text.endswith("Select: "):
+            seen["menu"] += 1
+            return "1" if seen["menu"] == 1 else "10"
+        return "y" if text.endswith(("[Y/n]: ", "[y/N]: ")) else "1"
+
+    slow.touch()
+    code, out = _drive_cli(args, answer, env, timeout=300, kill_when=started.exists)
+    assert code == 143, out[-3000:]
+    assert "stopped by SIGTERM during ALIGNMENT" in out
+    assert not (dst / "alignment" / "bam" / "Ctrl1.sorted.bam").exists()      # nothing partial accepted
+    assert subprocess.run(["pgrep", "-f", r"^sleep 31\.73$"], capture_output=True).returncode != 0
+    status, _ = _status_after(dst, tmp_path / "s1", lambda _: None)
+    assert status["alignment_completed"] != "VALID"
+
+    slow.unlink()
+    seen["menu"] = 0
+    before = len((dst / "logs" / "commands.jsonl").read_text().splitlines())
+    code, out = _drive_cli(args, answer, env, timeout=900)
+    assert code == 0, out[-3000:]
+    status, memo = _status_after(dst, tmp_path / "s2", lambda _: None)
+    assert all(v == "VALID" for v in status.values()), {k: memo.get(k) for k, v in status.items() if v != "VALID"}
+    new = (dst / "logs" / "commands.jsonl").read_text().splitlines()[before:]
+    aligned = [json.loads(l)["sample"] for l in new if '"hisat2' in l]
+    assert aligned == ["Ctrl1"], aligned                                        # the other samples were reused
+    assert (dst / "counts" / "gene_count_matrix.tsv").read_bytes() == \
+        (p / "counts" / "gene_count_matrix.tsv").read_bytes()                   # same result as an uninterrupted run

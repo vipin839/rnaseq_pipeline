@@ -66,6 +66,10 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **Strandedness in the project state is checked against the confirmed decision.** Old: if the value later stages
+  read (project state) differed from the checkpointed decision, featureCounts results computed with the old value
+  stayed VALID, and a later re-run would silently use the new one. New: the strandedness stage is INVALID until the
+  decision is made again, and everything downstream follows.
 * **A correct BAM was rejected when the system clock stepped backwards.** Old: the BAM index was required to be
   newer than the BAM by file time. The WSL2 clock stepped back ~1 s between writing a BAM and its index, and a
   correct BAM was rejected ("index is older than the BAM"); conversely, a stale index with a newer time passed. New:
@@ -101,7 +105,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 237 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 244 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

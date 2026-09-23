@@ -725,6 +725,19 @@ class StrandednessStage(Stage):
     settings = ("strandedness", "strandedness_inference")
     result_settings = ("strandedness", "strandedness_inference")
 
+    def revalidate(self, ctx, data):
+        """Later stages read the decision from the project state; it must still be the recorded, checkpointed one."""
+        try:
+            recorded = json.loads(ctx.project.path("alignment", "reports", "strandedness.json").read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return [f"recorded strandedness decision unreadable: {e}"]
+        live = ctx.project.state.get("strandedness") or {}
+        diff = [k for k in ("value", "featurecounts_flag") if live.get(k) != recorded.get(k)]
+        if diff:
+            return [f"strandedness in the project state ({live.get('value')}) differs from the confirmed decision "
+                    f"({recorded.get('value')}); the decision must be made again"]
+        return []
+
     def execute(self, ctx):
         p, cfg = ctx.project, ctx.cfg
         si = cfg["strandedness_inference"]
