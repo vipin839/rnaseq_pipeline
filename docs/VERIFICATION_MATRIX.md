@@ -69,6 +69,7 @@ positives, 58 genes tested, 16 checkpoints**. This is the reference outcome ever
 | Resume | SIGTERM / closed terminal | **FAILS** (F2) | VERIFIED (F2 fixed) — signal tests |
 | Security | no `shell=True`/`os.system`/`eval`; `yaml.safe_load` | VERIFIED (grep) | VERIFIED — grep + `failure::test_no_shell_expansion` |
 | Security | credentials never written/logged | **FAILS** — API key copied into `project_config.yaml`; would reach `config_used_*`, manifest, HTML report; appears in request URLs in error messages (F0) | VERIFIED (F0 fixed) — `security/` (8 tests), `test_no_credentials_anywhere_in_project` |
+| Errors | failure screen answers what / where / why / what to do / impact / retry (plan M1) | PARTIALLY — no impact/retry; internal stage keys | VERIFIED — `unit::test_failure_screen_states_impact_and_retry`, `test_failure_screen_names_the_step_the_user_sees` (fail without the change) |
 | Errors | no broad exception hiding failures | PARTIALLY VERIFIED — 5 broad handlers, none hides a failure; should be narrowed (F6) | VERIFIED (F6 fixed) — handlers narrowed |
 | Dependencies | missing tool detected before a stage starts | RISK — only at command start ("program not found") (F14) | VERIFIED (F14 fixed) — `unit::test_missing_tool_reported_before_stage_starts` |
 | Doctor | `--check` functional health check | PARTIALLY VERIFIED — presence + version only (F15) | VERIFIED (F15 fixed) — `integration::test_health_check_runs_real_mini_job`; `packaging::test_check_without_tools_fails_cleanly` |

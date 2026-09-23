@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Start with `logs/pipeline_errors.log`, then open the per-tool log named in the error (`logs/<stage>/<sample>.log`).
-Every failure screen shows **Problem**, **Likely cause** and **Recommended action**.
+Every failure screen shows the **Stage**, **Problem**, **Likely cause**, **Recommended action**, **Impact** (what was kept or discarded) and **Retry** (whether and when retrying is safe, and what it repeats).
 
 | Symptom | Likely cause | What to do |
 |---|---|---|

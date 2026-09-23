@@ -671,3 +671,26 @@ def test_create_and_runtime_env_use_the_compatible_file(old_cpu, capsys):
     out = capsys.readouterr()
     assert out.out.strip().endswith("rnaseq-tools.cpu-compatible.yml")   # stdout: only the path
     assert "stringtie=2.2.3" in out.err                                   # explanation on stderr
+
+
+# ---------------------------------------------------------------- P1/M1: every failure says impact and retry
+def test_failure_screen_states_impact_and_retry(capsys):
+    from rnaseq_pipeline import ui
+    ui.explain_failure(PipelineError("featureCounts failed", stage="featurecounts_completed", sample=None,
+                                     cause="disk full", remedy="free space"))
+    out = capsys.readouterr().out
+    for field in ("Problem", "Likely cause", "Recommended action", "Impact", "Retry"):
+        assert field in out, field
+    assert "not used" in out and "earlier" in out            # what is kept / discarded
+    ui.explain_failure(PipelineError("bad config", impact="nothing was changed", retry="after editing the file"))
+    out = capsys.readouterr().out
+    assert "nothing was changed" in out and "after editing the file" in out
+
+
+def test_failure_screen_names_the_step_the_user_sees(capsys):
+    from rnaseq_pipeline import ui, workflow
+    for tag, step in (("reference", "STEP 6: REFERENCE PREPARATION"), ("featurecounts_completed", "STEP 11:"),
+                      ("count_matrix", "STEP 12:"), ("deseq2", "STEP 14:")):
+        ui.explain_failure(PipelineError("x", stage=tag))
+        assert step in capsys.readouterr().out, tag
+    assert len({ui.STAGE_TITLES[s.key] for s in workflow.STAGES}) == len(workflow.STAGES)

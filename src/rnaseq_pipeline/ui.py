@@ -188,6 +188,9 @@ def pause():
     _input("Press Enter to continue...")
 
 
+STAGE_TITLES = {}   # stage tag -> "STEP n: TITLE"; filled by workflow (ui must not import it)
+
+
 def explain_failure(err):
     """Print a structured failure block for a PipelineError."""
     print()
@@ -195,7 +198,7 @@ def explain_failure(err):
     print("STATUS: FAILED")
     pairs = []
     if getattr(err, "stage", None):
-        pairs.append(("Stage", err.stage))
+        pairs.append(("Stage", STAGE_TITLES.get(err.stage, err.stage)))
     if getattr(err, "sample", None):
         pairs.append(("Sample", err.sample))
     pairs.append(("Problem", scrub(str(err))))
@@ -203,8 +206,16 @@ def explain_failure(err):
         pairs.append(("Likely cause", scrub(str(err.cause))))
     if getattr(err, "remedy", None):
         pairs.append(("Recommended action", scrub(str(err.remedy))))
+    stage = getattr(err, "stage", None)
+    impact = getattr(err, "impact", None) or (
+        "no checkpoint was written for this step and its outputs are not used; earlier completed steps are kept"
+        if stage else "nothing in the project was changed")
+    retry = getattr(err, "retry", None) or (
+        "safe after fixing the cause above; resuming repeats only this step (and the steps after it), nothing "
+        "already completed is lost" if stage else "yes, after fixing the cause above")
+    pairs += [("Impact", scrub(str(impact))), ("Retry", scrub(str(retry)))]
     kv(pairs)
     rule("!")
-    log.error("FAILED stage=%s sample=%s problem=%s cause=%s remedy=%s",
+    log.error("FAILED stage=%s sample=%s problem=%s cause=%s remedy=%s impact=%s retry=%s",
               getattr(err, "stage", None), getattr(err, "sample", None), err,
-              getattr(err, "cause", None), getattr(err, "remedy", None))
+              getattr(err, "cause", None), getattr(err, "remedy", None), impact, retry)

@@ -16,12 +16,14 @@ USER_STATE_DIR = Path(os.environ.get("RNASEQ_PIPELINE_HOME", Path.home() / ".rna
 class PipelineError(Exception):
     """A handled pipeline failure with a user-facing explanation."""
 
-    def __init__(self, message, *, cause=None, remedy=None, sample=None, stage=None):
+    def __init__(self, message, *, cause=None, remedy=None, sample=None, stage=None, impact=None, retry=None):
         super().__init__(message)
         self.cause = cause
         self.remedy = remedy
         self.sample = sample
         self.stage = stage
+        self.impact = impact    # what was kept / discarded (defaults in ui.explain_failure)
+        self.retry = retry      # whether and when retrying is safe, and what a retry repeats
 
 
 class UserAbort(Exception):

@@ -1128,6 +1128,12 @@ STAGES = [DataStage(), FastqVerifyStage(), RawQCStage(), QualityGateStage(), Tri
           AlignmentStage(), BamQCStage(), StrandednessStage(), StringTieStage(), FeatureCountsStage(),
           CountMatrixStage(), DesignStage(), DESeq2Stage(), ReportStage()]
 BY_KEY = {s.key: s for s in STAGES}
+for _i, _s in enumerate(STAGES, 1):
+    # failure screens show the step the user sees; modules tag errors with the key or its first word
+    ui.STAGE_TITLES[_s.key] = f"STEP {_i}: {_s.title}"
+    ui.STAGE_TITLES.setdefault(_s.key.split("_")[0], ui.STAGE_TITLES[_s.key])
+ui.STAGE_TITLES.update(count_matrix=ui.STAGE_TITLES["count_matrix_completed"],
+                       bam_qc=ui.STAGE_TITLES["bam_qc_completed"])
 
 
 # ============================================================================ status / resume
