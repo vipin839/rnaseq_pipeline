@@ -83,6 +83,24 @@ positives, 58 genes tested, 16 checkpoints**. This is the reference outcome ever
 | Packaging | Bioconda recipe | MISSING | VERIFIED locally — `bioconda-utils lint`: All checks OK; `conda-build` succeeded and the recipe tests passed (`--check`: 38 passed, 1 warning [NCBI email], 0 failed). Not submitted to Bioconda (user decision) |
 | Release | single version source, CHANGELOG, tag, CI | MISSING — no CI, no release process (F17) | VERIFIED (F17 fixed) — `unit/test_release.py` (6 tests); CI workflow |
 
+## P2 real-data acceptance (PRJNA601158, Arabidopsis FERONIA mutant vs WT, full data)
+
+| Gate | Status | Evidence |
+|---|---|---|
+| Real bulk dataset acquired, metadata validated | VERIFIED | 6 runs, MD5 verified; single-end, RNA-Seq, TRANSCRIPTOMIC |
+| Correct reference acquired and validated | VERIFIED | NCBI TAIR10.1, checksums verified; strand-'?' records noted (H12) |
+| FASTQ, raw QC, quality gate, trimming | VERIFIED | FastQC counts = FASTQ counts; gate recommended trimming (adapters); fastp output re-validated |
+| Alignment and BAM | VERIFIED | primary = reads after fastp for every sample; 85.4–88.5 % aligned |
+| Strandedness | VERIFIED | FORWARD, high confidence, all samples agree, confirmed |
+| featureCounts + matrix reconciled | VERIFIED | column sums = Assigned exactly (all 6) |
+| Design | VERIFIED | `~ condition`, WT baseline, validated in Python and R |
+| DESeq2 + results re-derived; plots | VERIFIED | no problems; direction 752/752; plot data reconciled |
+| Biological positive control | VERIFIED | FER log2FC −5.39, padj 1.0e−36 |
+| HTML report + manifest | VERIFIED | report validated; manifest complete |
+| Interrupted and resumed | VERIFIED | SIGTERM during alignment: exit 143, only the missing samples re-aligned |
+| Project health | VERIFIED | every area PASS |
+| Reproducible from the recorded parameters | VERIFIED | DESeq2 re-run byte-identical |
+
 ## 3. Findings (BEFORE)
 
 | ID | Severity | Location | Root cause | Impact |
