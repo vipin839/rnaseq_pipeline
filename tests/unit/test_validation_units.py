@@ -704,3 +704,28 @@ def test_only_validated_aligner_accepted():
     cfg["aligner"] = "star"
     errs = C.validate(cfg)
     assert any("STAR" in e and "not available" in e for e in errs), errs
+
+
+# ---------------------------------------------------------------- P2 finding H12: strand '?' in NCBI annotations
+_GTF_OK = ('c1\tRefSeq\texon\t100\t200\t.\t+\t.\tgene_id "g1"; transcript_id "t1";\n'
+           'c1\tRefSeq\texon\t300\t400\t.\t-\t.\tgene_id "g2"; transcript_id "t2";\n')
+
+
+def test_unknown_strand_on_trans_spliced_transcript_is_noted(tmp_path):
+    """NCBI marks transcript-level records of trans-spliced organellar genes (e.g. Arabidopsis nad1, nad2, rps12)
+    with strand '?'; their exon records carry real strands and are what is counted."""
+    f = tmp_path / "a.gtf"
+    f.write_text(_GTF_OK + 'c1\tRefSeq\ttranscript\t100\t400\t.\t?\t.\tgene_id "g1"; transcript_id "t9"; '
+                           'exception "trans-splicing";\n')
+    info = reference_manager.validate_gtf(f)
+    assert info["unknown_strand"] == {"transcript": ["g1"]}
+    assert info["genes"] == 2
+
+
+@pytest.mark.parametrize("ftype", ["exon", "CDS"])
+def test_unknown_strand_on_counted_features_is_refused(tmp_path, ftype):
+    f = tmp_path / "a.gtf"
+    f.write_text(_GTF_OK + f'c1\tRefSeq\t{ftype}\t500\t600\t.\t?\t.\tgene_id "g3"; transcript_id "t3";\n')
+    with pytest.raises(PipelineError) as e:
+        reference_manager.validate_gtf(f)
+    assert "strand" in str(e.value) and e.value.cause and e.value.remedy

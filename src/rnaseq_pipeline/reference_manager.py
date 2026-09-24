@@ -129,6 +129,8 @@ def validate_gtf(path, attribute="gene_id", feature_type="exon"):
     opener = gzip.open if path.name.endswith(".gz") else open
     seq_max_end, genes, transcripts = {}, set(), set()
     exons, features, header = 0, {}, []
+    unknown_strand = {}          # feature type -> gene ids with strand '?' (allowed only on non-counted types)
+    strand_needed = {"exon", "CDS", feature_type}
     missing_attr = 0
     with opener(path, "rt", encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
@@ -150,8 +152,20 @@ def validate_gtf(path, attribute="gene_id", feature_type="exon"):
                 raise PipelineError(f"GTF line {lineno}: non-integer coordinates", stage="reference") from None
             if s < 1 or e < s:
                 raise PipelineError(f"GTF line {lineno}: invalid interval {s}-{e}", stage="reference")
-            if strand not in GTF_STRANDS:
-                raise PipelineError(f"GTF line {lineno}: invalid strand {strand!r}", stage="reference")
+            if strand == "?" and ftype not in strand_needed:
+                # e.g. NCBI transcript records of trans-spliced organellar genes (Arabidopsis nad1/nad2/rps12):
+                # pieces lie on both strands; their exon records carry real strands and are what is counted
+                gid = dict(ATTR_RE.findall(attrs)).get(attribute, "?")
+                unknown_strand.setdefault(ftype, [])
+                if gid not in unknown_strand[ftype]:
+                    unknown_strand[ftype].append(gid)
+            elif strand not in GTF_STRANDS:
+                raise PipelineError(f"GTF line {lineno}: invalid strand {strand!r} on a '{ftype}' record",
+                                    stage="reference",
+                                    cause="strand must be '+', '-' or '.'; reads are counted strand-specifically on "
+                                          f"'{ftype}' records, so an unknown strand there cannot be used",
+                                    remedy="use the provider's standard GTF for this assembly (or fix/remove these "
+                                           "records); a GFF3 file can be converted with: gffread in.gff3 -T -o out.gtf")
             if "=" in attrs and '"' not in attrs:
                 raise PipelineError("annotation looks like GFF3, not GTF", stage="reference",
                                     remedy="convert with: gffread annotation.gff3 -T -o annotation.gtf")
@@ -184,7 +198,35 @@ def validate_gtf(path, attribute="gene_id", feature_type="exon"):
             break
     return {"seqnames": sorted(seq_max_end), "seq_max_end": seq_max_end, "genes": len(genes),
             "transcripts": len(transcripts), "exons": exons, "feature_types": features,
-            "header_build": build, "attribute": attribute, "feature_type": feature_type}
+            "header_build": build, "attribute": attribute, "feature_type": feature_type,
+            "unknown_strand": unknown_strand}
+
+
+def stringtie_annotation(gtf, out):
+    """(path, removed): an annotation StringTie2 can parse.
+
+    StringTie2 refuses two standard NCBI GTF conventions: gene-level records with transcript_id "" ("no valid ID
+    found") and records with strand '?' (trans-spliced transcripts; only allowed on non-counted feature types, see
+    validate_gtf). When present, a copy without exactly those records is written (exon/transcript structure
+    unchanged); otherwise the original is used and nothing is written."""
+    gtf, out = Path(gtf), Path(out)
+    removed = {"gene records with an empty transcript_id": 0, "records with strand '?'": 0}
+    tmp = out.with_name(out.name + ".partial")
+    with open(gtf, encoding="utf-8", errors="replace") as f, open(tmp, "w") as o:
+        for line in f:
+            cols = line.split("\t")
+            if len(cols) == 9 and cols[6] == "?":
+                removed["records with strand '?'"] += 1
+                continue
+            if len(cols) == 9 and 'transcript_id ""' in cols[8]:
+                removed["gene records with an empty transcript_id"] += 1
+                continue
+            o.write(line)
+    if not any(removed.values()):
+        tmp.unlink()
+        return gtf, {}
+    os.replace(tmp, out)
+    return out, removed
 
 
 def check_compatibility(fa, gtf, genome_assembly=None, annotation_assembly=None):
@@ -610,6 +652,14 @@ def prepare(ref, cfg, threads, mem_gb, ram_available_gb, log_file, on_feature_ty
             ftype, switched = alt, True
     gtf = validate_gtf(paths.gtf, cfg["featurecounts_parameters"]["attribute"], ftype)
     ui.ok(f"GTF valid: {gtf['genes']:,} genes, {gtf['transcripts']:,} transcripts, {gtf['exons']:,} {ftype} features")
+    st_gtf, st_removed = stringtie_annotation(paths.gtf, paths.gtf.with_name("annotation.stringtie.gtf"))
+    if st_removed:
+        ui.info("StringTie2 cannot parse " + " and ".join(f"{n:,} {k}" for k, n in st_removed.items() if n)
+                + f" (standard in NCBI GTFs); it uses {st_gtf.name}, a copy without those records (exons unchanged)")
+    for kind, ids in gtf["unknown_strand"].items():
+        ui.warn(f"{len(ids)} '{kind}' record(s) have strand '?' (genes: {', '.join(ids[:8])}). This is how NCBI marks "
+                "trans-spliced genes whose pieces lie on both strands (e.g. organellar nad1, nad2, rps12). Their "
+                f"{ftype} records carry real strands and are counted normally; recorded in reference_manifest.yaml")
     if "exon" not in gtf["feature_types"]:
         ui.info("no 'exon' features (typical for bacterial annotation): HISAT2 will align without splice sites "
                 "and StringTie2 transcript quantification is not meaningful")
@@ -680,6 +730,9 @@ def prepare(ref, cfg, threads, mem_gb, ram_available_gb, log_file, on_feature_ty
                   "splice_sites_file": str(paths.splice_sites), "exons_file": str(paths.exons)},
         "compatibility": {"errors": errors, "warnings": warns, "override": bool(ref.get("override_compatibility"))},
         "store": str(paths.base),
+        "annotation_notes": {**({"unknown_strand_records": gtf["unknown_strand"]} if gtf["unknown_strand"] else {}),
+                             **({"stringtie_annotation": {"path": str(st_gtf), "removed": st_removed}}
+                                if st_removed else {})},
     }
     write_manifest(paths.manifest, manifest)
     info = {"paths": paths, "fa": fa, "gtf": gtf, "feature_type": ftype, "feature_type_switched": switched,
@@ -687,6 +740,7 @@ def prepare(ref, cfg, threads, mem_gb, ram_available_gb, log_file, on_feature_ty
             "state": {"index_prefix": str(paths.index_prefix), "index_has_splice_sites": use_ss,
                       "no_splice_sites": paths.splice_sites.exists() and paths.splice_sites.stat().st_size == 0,
                       "splice_sites": str(paths.splice_sites), "gtf": str(paths.gtf), "bed12": str(paths.bed12),
+                      "stringtie_gtf": str(st_gtf),
                       "genes": gtf["genes"], "genome_bp": fa["total_bp"]}}
     return manifest, info
 

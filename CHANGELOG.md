@@ -87,6 +87,14 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **NCBI annotations with trans-spliced genes were rejected.** Found in the Arabidopsis acceptance run: the official
+  NCBI TAIR10.1 GTF marks 3 transcript records of trans-spliced organellar genes (nad1, nad2, rps12) with strand
+  '?', and the whole annotation was refused. Strand '?' is now accepted on non-counted feature types (warning naming
+  the genes; recorded in `reference_manifest.yaml`) and still refused on exon/CDS records, with cause and remedy.
+* **StringTie2 failed on NCBI annotations.** StringTie2 refuses two standard NCBI GTF conventions (gene records with
+  `transcript_id ""`, strand '?'). It now uses `annotation.stringtie.gtf`, a copy without exactly those records
+  (exons unchanged), created during reference preparation or, for older references, by the StringTie step itself
+  (no re-alignment needed). featureCounts and HISAT2 use the original annotation.
 * **Stalled downloads no longer hang, and a flaky connection that keeps delivering data finishes.** Found in the
   real-data acceptance run: an ENA connection stopped delivering data and `curl` waited indefinitely (no stall
   timeout); separately, every dropped connection used one of 3 retries even when data kept arriving, so a large file
@@ -144,7 +152,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 265 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 270 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

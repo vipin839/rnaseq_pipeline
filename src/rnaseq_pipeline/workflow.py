@@ -624,6 +624,8 @@ class ReferenceStage(Stage):
         ctx.project.save()
         outs = [proj_manifest, summary_txt, paths.gtf, paths.splice_sites, paths.bed12,
                 *reference_manager.index_files(paths.index_prefix)]
+        if r.get("stringtie_gtf") and r["stringtie_gtf"] != str(paths.gtf):
+            outs.append(Path(r["stringtie_gtf"]))
         return outs, {"reference": r.get("label")}, {"genes": gtf["genes"]}
 
     def revalidate(self, ctx, data):
@@ -896,9 +898,24 @@ class StringTieStage(Stage):
             return [note], {"samples": ctx.samples, "enabled": False}, {"enabled": False}
         strand = (p.state.get("strandedness") or {}).get("value", "unstranded")
         outs, failures = [], {}
+        r = ctx.ref()
+        if not r.get("stringtie_gtf") and not ctx.dry_run:
+            # reference prepared by an older version: derive the StringTie2-compatible annotation now
+            # (no need to prepare the reference again or to re-align)
+            st_gtf, removed = reference_manager.stringtie_annotation(
+                r["gtf"], Path(r["gtf"]).with_name("annotation.stringtie.gtf"))
+            r["stringtie_gtf"] = str(st_gtf)
+            p.save()
+            if removed:
+                ui.info("StringTie2 cannot parse " + " and ".join(f"{n:,} {k}" for k, n in removed.items() if n)
+                        + f" (standard in NCBI GTFs); it uses {st_gtf.name}, a copy without those records "
+                        "(exons unchanged)")
+        if r.get("stringtie_gtf") and r["stringtie_gtf"] != r.get("gtf"):
+            outs.append(Path(r["stringtie_gtf"]))
         for sid in ctx.samples:
             try:
-                g, a = stringtie.run_sample(p, sid, p.path("alignment", "bam", f"{sid}.sorted.bam"), ctx.ref()["gtf"],
+                g, a = stringtie.run_sample(p, sid, p.path("alignment", "bam", f"{sid}.sorted.bam"),
+                                             ctx.ref().get("stringtie_gtf") or ctx.ref()["gtf"],
                                             strand, ctx.cfg["stringtie_parameters"], ctx.threads,
                                             ctx.log("stringtie", sid))
                 outs += [g, a]

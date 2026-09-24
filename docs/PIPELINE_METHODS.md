@@ -70,6 +70,7 @@ Invalid trimmed output stops the pipeline.
 * Catalog references are downloaded and verified against the provider's checksums (GENCODE/UCSC/NCBI MD5,
   Ensembl BSD `sum`), and a SHA-256 is recorded. They are kept in a **shared store** (`reference_store`) and linked into projects.
 * FASTA validation: header present, unique names, IUPAC alphabet, no empty sequences.
+* GTF validation: strand '?' (how NCBI marks trans-spliced transcripts) is accepted only on feature types that are not counted, with a warning naming the genes, and refused on exon/CDS records. StringTie2 receives `annotation.stringtie.gtf` when the annotation contains records it cannot parse (NCBI gene records with `transcript_id ""`, strand '?'): a copy without exactly those records, exons unchanged.
 * GTF validation: 9 columns, integer coordinates with start ≤ end, strand `+ - .`, exons carry `gene_id` and
   `transcript_id`. GFF3 is detected and rejected with a conversion hint.
 * **Compatibility:** chromosome names must be shared (with a chr-prefix diagnosis if not), annotation coordinates must not

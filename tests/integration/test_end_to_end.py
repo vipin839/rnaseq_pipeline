@@ -990,3 +990,39 @@ def test_project_health_blocking_issue_named(project, tmp_path):
     assert s["DATA"] == "PASS" and s["ALIGNMENT"] == "PASS"                  # upstream areas unaffected
     blocking = r.stdout[r.stdout.index("BLOCKING ISSUES"):]
     assert "GENE COUNT MATRIX" in blocking.split("NON-BLOCKING")[0], blocking[:800]
+
+
+# ---------------------------------------------------------------- P2 finding H13: StringTie2 and NCBI GTF conventions
+# Verbatim records from the NCBI TAIR10.1 annotation (GCF_000001735.4) that StringTie2 refuses; found in the
+# Arabidopsis acceptance run. Hand-made imitations did not trigger the failure, so the real lines are used.
+NCBI_GENE_LINE = ('NC_003070.9\tRefSeq\tgene\t3631\t5899\t.\t+\t.\tgene_id "AT1G01010"; transcript_id ""; '
+                  'db_xref "Araport:AT1G01010"; db_xref "TAIR:AT1G01010"; db_xref "GeneID:839580"; gbkey "Gene"; '
+                  'gene "NAC001"; gene_biotype "protein_coding"; gene_synonym "ANAC001"; gene_synonym "NAC domain '
+                  'containing protein 1"; gene_synonym "T25K16.1"; gene_synonym "T25K16_1"; locus_tag "AT1G01010"; \n')
+NCBI_TRANS_SPLICED = ('NC_037304.1\tRefSeq\ttranscript\t58315\t234132\t.\t?\t.\tgene_id "DA397_mgp34"; '
+                      'transcript_id "unassigned_transcript_82"; exception "RNA editing, trans-splicing"; '
+                      'gbkey "mRNA"; gene "nad1"; locus_tag "DA397_mgp34"; transcript_biotype "mRNA"; \n')
+
+
+@pytest.mark.parametrize("line,kind", [(NCBI_GENE_LINE, "gene records with an empty transcript_id"),
+                                       (NCBI_TRANS_SPLICED, "records with strand '?'")],
+                         ids=["gene-empty-transcript_id", "trans-spliced-strand-?"])
+def test_stringtie_gets_an_annotation_it_can_parse(project, tmp_path, line, kind):
+    from rnaseq_pipeline import reference_manager as R
+    p, _, _ = project
+    cp = json.loads((p / "checkpoints" / "reference_ready.json").read_text())
+    gtf = Path(next(o["path"] for o in cp["outputs"] if o["path"].endswith("annotation.gtf")))
+    ncbi = tmp_path / "ncbi_style.gtf"
+    ncbi.write_text(gtf.read_text() + line)
+    bam = p / "alignment" / "bam" / "Ctrl1.sorted.bam"
+    raw = subprocess.run(["stringtie", str(bam), "-G", str(ncbi), "-e", "-o", str(tmp_path / "raw.gtf")],
+                         capture_output=True, text=True)
+    assert raw.returncode != 0, "StringTie accepted the record; this test no longer reproduces the problem"
+    out, removed = R.stringtie_annotation(ncbi, tmp_path / "st.gtf")
+    assert out == tmp_path / "st.gtf" and removed[kind] == 1 and sum(removed.values()) == 1
+    ok = subprocess.run(["stringtie", str(bam), "-G", str(out), "-e", "-o", str(tmp_path / "ok.gtf")],
+                        capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stderr
+    assert out.read_text() == gtf.read_text()                                  # only that record was removed
+    same, none = R.stringtie_annotation(gtf, tmp_path / "unused.gtf")
+    assert same == gtf and none == {} and not (tmp_path / "unused.gtf").exists()   # no copy when not needed
