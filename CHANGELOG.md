@@ -74,6 +74,8 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   internal key. Both fields are written to `logs/pipeline_errors.log`.
 
 ### New
+* Release preparation: CI runs on Node 24 actions (no deprecation warnings); the Bioconda recipe requires exactly the
+  tool versions the runtime environment files install and the pipeline is tested with (checked by a release test).
 * Installable Python package (`src/rnaseq_pipeline`, `pyproject.toml`): commands `rnaseq-pipeline` and
   `rnaseq_pipeline`, and `python -m rnaseq_pipeline`. The version has a single source (`__version__`).
 * User configuration `~/.config/rnaseq-pipeline/config.yaml`, loaded automatically; projects default to
@@ -154,7 +156,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 272 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 273 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

@@ -3,6 +3,17 @@
 The version is defined in exactly one place, `src/rnaseq_pipeline/__init__.py` (`__version__`). `pyproject.toml` reads
 it, and `tests/unit/test_release.py` fails if the CHANGELOG top entry or the Bioconda recipe disagree.
 
+## Release readiness of 1.1.0 (P3, 25 September 2026)
+
+| Item | Status |
+|---|---|
+| Core stabilization (P0, P1) and real-data acceptance (P2: Arabidopsis full data; human GRCh38) | done — see docs/TESTING.md |
+| Test suite | 273 tests pass (265 by default + 8 packaging) |
+| CI | 11 jobs green on Node 24 actions (checkout v7, setup-python v7, upload-artifact v7, setup-micromamba v3); no warnings |
+| Clean install from GitHub (`pipx install git+…`, empty HOME, minimal PATH) | verified: commands on PATH, version 1.1.0, runtime environment files found (CPU-aware), clear errors |
+| Bioconda recipe | run dependencies equal the tested environment files (enforced by `test_release.py`); dependencies solve in one environment with the tested versions; `bioconda-utils lint`: All checks OK |
+| Tag `v1.1.0`, GitHub release, PyPI, Bioconda submission | **not done — only on the owner's request** (steps 3–5 below) |
+
 ## 1. Prepare
 
 1. Set `__version__` (semantic versioning: MAJOR incompatible, MINOR features, PATCH fixes).
