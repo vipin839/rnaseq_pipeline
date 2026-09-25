@@ -87,6 +87,8 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   build and clean-install tests, integration tests with the real tools); Bioconda recipe prepared (not yet submitted).
 
 ### Fixed
+* **A wrong project path gave a Python traceback** (`--validate-project`, seen on the lab machine). Now a clear error
+  that lists the projects that do exist and how to search for one; also when the folder is not a pipeline project.
 * **NCBI annotations with trans-spliced genes were rejected.** Found in the Arabidopsis acceptance run: the official
   NCBI TAIR10.1 GTF marks 3 transcript records of trans-spliced organellar genes (nad1, nad2, rps12) with strand
   '?', and the whole annotation was refused. Strand '?' is now accepted on non-counted feature types (warning naming
@@ -152,7 +154,7 @@ byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE gen
   modern CPUs.
 
 ### Tests
-* 270 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
+* 272 tests (127 at the start of this work, commit 08a9c11): security, download failures, signals, reconciliation invariants, report tampering, a
   13-scenario resume-invalidation matrix, unstranded / forward / single-end libraries and a deliberately wrong
   strandedness setting end to end, project-health and doctor checks, release consistency, and clean installs
   (venv and pipx).

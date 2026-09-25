@@ -1053,6 +1053,21 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+def _project_folder(path, projects_dir):
+    """The project folder a user named on the command line, or a clear error listing the projects that exist."""
+    p = Path(os.path.expanduser(str(path))).resolve()
+    if p.is_dir() and (p / "project.json").exists():
+        return p
+    root = Path(os.path.expanduser(str(projects_dir)))
+    known = sorted(d.name for d in root.glob("*") if (d / "project.json").exists()) if root.is_dir() else []
+    problem = f"project folder not found: {p}" if not p.is_dir() else \
+        f"{p} is not a pipeline project (it has no project.json)"
+    raise PipelineError(problem,
+                        cause="the path is mistyped, or the project was created under another name or folder",
+                        remedy=(f"projects in {root}: {', '.join(known)}" if known else f"no projects in {root}")
+                        + "; to search everywhere: find ~ /media -maxdepth 5 -name project.json 2>/dev/null")
+
+
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     ui.VERBOSE = args.verbose or bool(C.load().get("verbose"))
@@ -1077,10 +1092,12 @@ def main(argv=None):
             doctor.show(rep)
             return 1 if rep.overall == doctor.FAIL else 0
         if args.validate_project:
-            overall, rows, pending = project_health.check(V.existing_dir(args.validate_project))
-            project_health.show(args.validate_project, overall, rows, pending)
+            folder = _project_folder(args.validate_project, app.projects_dir)
+            overall, rows, pending = project_health.check(folder)
+            project_health.show(folder, overall, rows, pending)
             return 1 if overall == project_health.FAIL else 0
         if args.project:
+            args.project = str(_project_folder(args.project, app.projects_dir))
             if args.dry_run:
                 p = Project.open(args.project)
                 logger.attach_project(p.path("logs"))

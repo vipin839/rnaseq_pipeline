@@ -1026,3 +1026,16 @@ def test_stringtie_gets_an_annotation_it_can_parse(project, tmp_path, line, kind
     assert out.read_text() == gtf.read_text()                                  # only that record was removed
     same, none = R.stringtie_annotation(gtf, tmp_path / "unused.gtf")
     assert same == gtf and none == {} and not (tmp_path / "unused.gtf").exists()   # no copy when not needed
+
+
+# ---------------------------------------------------------------- field finding H14: wrong project path
+@pytest.mark.parametrize("flag", ["--validate-project", "--project"])
+def test_wrong_project_path_is_explained_with_existing_projects(project, tmp_path, flag):
+    """Seen on the lab machine: a mistyped path to --validate-project printed a Python traceback."""
+    p, _, cfg = project
+    for target in (tmp_path / "RNAseq_Typo", tmp_path):            # missing folder; folder that is not a project
+        r = run_cli(["--config", str(cfg), "--projects-dir", str(p.parent), flag, str(target)], ["10", "8"],
+                    timeout=300)
+        out = r.stdout + r.stderr
+        assert "Traceback" not in out, out[-2000:]
+        assert r.returncode == 1 and "RNAseq_E2E" in out, out[-2000:]            # names the projects that exist
