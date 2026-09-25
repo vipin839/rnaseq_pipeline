@@ -66,6 +66,21 @@ Full data (not a pilot), driven through the real interactive CLI with every answ
 | Runtime (tool time) | download 2 h 39 min at 0.1–0.7 MB/s (network-bound); reference download + HISAT2 index with splice sites 2.5 min; alignment 4.6 min; everything else < 4 min |
 | Disk | project 4.1 GB + reference 2.1 GB = 6.2 GB |
 
+## Human acceptance run (mammalian genome, owner's second machine, 25 September 2026)
+
+Run by the owner on a machine without AVX2 (the tools environment was created from the CPU-compatible file:
+StringTie 2.2.3), following the step-by-step instructions; results reported from the machine's terminal.
+
+| | |
+|---|---|
+| Dataset | GSE145101 / PRJNA606044 — human WM3248 melanoma cells, control siRNA (siNC) vs PGC-1α knockdown (siPGC1a), 3 vs 3; one lane per replicate: SRR11067676/78/80 (siNC), SRR11067682/84/86 (siPGC1a); single-end 51 bp, ~17 M reads each, ~3.0 GB |
+| Reference | Human GRCh38, GENCODE 46 (catalog); HISAT2 index without splice sites (RAM rule), splice sites supplied at alignment |
+| Alignment | all 6 PASS; 98.34–98.38 % aligned; BAM primary = input reads for every sample |
+| DESeq2 | knockdown vs control: 103 up, 124 down |
+| Positive control | **PPARGC1A (ENSG00000109819): log2FC −1.38 (~2.6× lower, i.e. ~61 % knockdown), padj 2.6e−11, "down"** |
+| Project health | `--validate-project`: every area PASS (incl. scientific validation), no blocking or non-blocking issues |
+| Finding | H14 (traceback on a mistyped `--validate-project` path) — fixed |
+
 ## Real-data validation (regression evidence, not proof of general correctness)
 
 | Dataset | What was checked | Result |

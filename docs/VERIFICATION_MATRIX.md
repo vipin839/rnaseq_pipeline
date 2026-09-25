@@ -101,6 +101,15 @@ positives, 58 genes tested, 16 checkpoints**. This is the reference outcome ever
 | Project health | VERIFIED | every area PASS |
 | Reproducible from the recorded parameters | VERIFIED | DESeq2 re-run byte-identical |
 
+## Human (mammalian) acceptance — GSE145101, GRCh38 GENCODE 46, owner's pre-AVX2 machine
+
+| Gate | Status | Evidence |
+|---|---|---|
+| Mammalian reference download, index strategy, alignment | VERIFIED | GRCh38 plain index + splice sites at alignment; 98.3–98.4 % aligned; primary = input |
+| CPU-compatible runtime on a pre-AVX2 machine (plan P0/C1) | VERIFIED | environment created from `rnaseq-tools.cpu-compatible.yml`; all 15 steps ran |
+| Positive control | VERIFIED | PPARGC1A log2FC −1.38, padj 2.6e−11 |
+| Project health | VERIFIED | every area PASS |
+
 ## 3. Findings (BEFORE)
 
 | ID | Severity | Location | Root cause | Impact |
