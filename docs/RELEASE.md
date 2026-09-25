@@ -12,7 +12,8 @@ it, and `tests/unit/test_release.py` fails if the CHANGELOG top entry or the Bio
 | CI | 11 jobs green on Node 24 actions (checkout v7, setup-python v7, upload-artifact v7, setup-micromamba v3); no warnings |
 | Clean install from GitHub (`pipx install git+…`, empty HOME, minimal PATH) | verified: commands on PATH, version 1.1.0, runtime environment files found (CPU-aware), clear errors |
 | Bioconda recipe | run dependencies equal the tested environment files (enforced by `test_release.py`); dependencies solve in one environment with the tested versions; `bioconda-utils lint`: All checks OK |
-| Tag `v1.1.0`, GitHub release, PyPI, Bioconda submission | **not done — only on the owner's request** (steps 3–5 below) |
+| Tag `v1.1.0` and GitHub release (sdist + wheel attached) | done, 25 September 2026 (step 3 below) |
+| PyPI, Bioconda submission | **not done — only on the owner's request** (steps 4–5 below) |
 
 ## 1. Prepare
 

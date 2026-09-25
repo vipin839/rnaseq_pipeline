@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 — 2026-09-22
+## 1.1.0 — 2026-09-25
 
 Hardening and packaging release. Scientific results are unchanged: on the synthetic truth dataset the count matrix is
 byte-identical to 1.0.0 and the DESeq2 statistics differ by 0 (16/16 true DE genes, 0 false positives).
