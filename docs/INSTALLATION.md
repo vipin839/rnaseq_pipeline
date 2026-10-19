@@ -34,8 +34,9 @@ rnaseq-pipeline --check
 ## Option A — application with pipx, runtime with conda (recommended today)
 
 ```bash
-# 1. the command (isolated environment, exposed on PATH) — verified in a clean HOME
-pipx install git+https://github.com/vipin839/rnaseq_pipeline.git
+# 1. the command, from PyPI (isolated environment, exposed on PATH) — verified in a clean HOME
+pipx install bulk-rnaseq-pipeline
+#    (latest development version instead: pipx install git+https://github.com/vipin839/rnaseq_pipeline.git)
 
 # 2. conda (skip if you already have conda/mamba)
 curl -L -O https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
@@ -69,7 +70,7 @@ A Bioconda recipe is prepared in `packaging/bioconda/bulk-rnaseq-pipeline/meta.y
 the whole scientific runtime into one environment:
 
 ```bash
-mamba create -n rnaseq -c conda-forge -c bioconda --strict-channel-priority rnaseq-pipeline
+mamba create -n rnaseq -c conda-forge -c bioconda --strict-channel-priority bulk-rnaseq-pipeline
 mamba activate rnaseq
 rnaseq-pipeline --check
 ```
@@ -78,7 +79,9 @@ rnaseq-pipeline --check
 (from the release source archive) and its recipe tests passed in a fresh environment, including
 `rnaseq-pipeline --check`: `HEALTH: WARNING (38 passed, 1 warnings, 0 failed)` — the warning is the unset NCBI email;
 the mini-job counted 200/200 read pairs and DESeq2 loaded. The recipe becomes installable from Bioconda only after it
-has been submitted to and accepted by bioconda-recipes; see [RELEASE.md](RELEASE.md). Until then, use option A.
+has been accepted by bioconda-recipes. It was submitted on 19 October 2026
+([bioconda/bioconda-recipes#70436](https://github.com/bioconda/bioconda-recipes/pull/70436); all Bioconda checks
+pass, awaiting review). Until it is merged, use option A.
 
 ## Personal settings
 

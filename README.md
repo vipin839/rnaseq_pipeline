@@ -30,14 +30,16 @@ DATA (SRA / GEO / ENA / local, or search NCBI) -> FASTQ validation -> FastQC + M
 ## Install
 
 ```bash
-pipx install git+https://github.com/vipin839/rnaseq_pipeline.git         # the command
+pipx install bulk-rnaseq-pipeline                                         # the command (from PyPI)
 mamba env create -f "$(rnaseq-pipeline --runtime-env tools)"               # FastQC, HISAT2, samtools, ...
 mamba env create -f "$(rnaseq-pipeline --runtime-env r)"                   # R + DESeq2
 rnaseq-pipeline --check                                                    # functional health check
 ```
 
-See [docs/INSTALLATION.md](docs/INSTALLATION.md) for conda setup, the Bioconda recipe (one-command install after it
-is published), user settings and upgrading from 1.0.0.
+The package is on PyPI as [`bulk-rnaseq-pipeline`](https://pypi.org/project/bulk-rnaseq-pipeline/); the command is
+`rnaseq-pipeline`. The latest development version installs with `pipx install git+https://github.com/vipin839/rnaseq_pipeline.git`.
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for conda setup, the Bioconda recipe (one-command install once it
+is accepted), user settings and upgrading from 1.0.0.
 
 ## Use
 

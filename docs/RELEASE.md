@@ -7,6 +7,9 @@ it, and `tests/unit/test_release.py` fails if the CHANGELOG top entry or the Bio
 
 Packaging release: the distribution is renamed `bulk-rnaseq-pipeline` (PyPI refuses `rnaseq-pipeline` as too similar
 to the existing `rnaseqpipeline`), and PyPI publishing runs through Trusted Publishing (`publish.yml`).
+Published to PyPI on 19 October 2026 (https://pypi.org/project/bulk-rnaseq-pipeline/, with attestations); verified
+with `pipx install bulk-rnaseq-pipeline` in a clean HOME (`--version` 1.1.2, `--check`: 0 failed). Bioconda:
+bioconda/bioconda-recipes#70436, all checks green, awaiting review.
 
 ## Release 1.1.1 (19 October 2026)
 
