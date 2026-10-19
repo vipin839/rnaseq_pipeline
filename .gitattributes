@@ -6,3 +6,6 @@
 *.yml text eol=lf
 rnaseq_pipeline text eol=lf
 *.gz binary
+*.docx binary
+*.pdf binary
+*.png binary

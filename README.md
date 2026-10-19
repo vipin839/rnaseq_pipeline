@@ -13,6 +13,11 @@ to differential-expression results, plots and an HTML report.
 * Scientific decisions (trimming, strandedness, experimental design) are **never guessed**; you confirm each one, with
   an explanation.
 
+> **New to RNA-seq or to this tool?** Read the illustrated **User Guide and Learning Book**
+> ([PDF](docs/RNAseq_Pipeline_User_Guide.pdf) · [Word](docs/RNAseq_Pipeline_User_Guide.docx)): installation step by
+> step, every stage and tool explained in plain language with flowcharts, how to read the results and plots, a worked
+> example, troubleshooting, a glossary and how to cite. No programming knowledge needed.
+
 ```
 DATA (SRA / GEO / ENA / local, or search NCBI) -> FASTQ validation -> FastQC + MultiQC -> quality gate
   -> [fastp -> validation -> FastQC + MultiQC]  (only if you decide to trim)
@@ -66,6 +71,7 @@ rnaseq-pipeline --check                      # installation health check
 
 | Document | Contents |
 |---|---|
+| [User Guide and Learning Book (PDF)](docs/RNAseq_Pipeline_User_Guide.pdf) / [Word](docs/RNAseq_Pipeline_User_Guide.docx) | complete illustrated guide for users: setup, workflow with flowcharts, every tool, result interpretation, worked example, troubleshooting, glossary, citation |
 | [docs/INSTALLATION.md](docs/INSTALLATION.md) | install options, runtime layer, user settings, upgrading |
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | step-by-step use, menus, decisions, resuming, logs |
 | [docs/PIPELINE_METHODS.md](docs/PIPELINE_METHODS.md) | what each stage does, parameters, thresholds, validation |
@@ -75,5 +81,22 @@ rnaseq-pipeline --check                      # installation health check
 | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | architecture and extension points |
 | [docs/RELEASE.md](docs/RELEASE.md) | release procedure (tag, PyPI, Bioconda) |
 | [CHANGELOG.md](CHANGELOG.md) | version history |
+
+## How to cite
+
+> Vipin (2026). rnaseq-pipeline: an interactive, validated and resumable bulk RNA-seq pipeline (version 1.1.0)
+> [Computer software]. GitHub. https://github.com/vipin839/rnaseq_pipeline
+
+Please also cite the tools the pipeline runs (FastQC, MultiQC, fastp, HISAT2, SAMtools, RSeQC, StringTie2,
+featureCounts, DESeq2, apeglm). Full references and an example methods paragraph are in chapter 22 of the
+[User Guide](docs/RNAseq_Pipeline_User_Guide.pdf).
+
+## Developer and contact
+
+Developed and maintained by **Vipin** ([github.com/vipin839](https://github.com/vipin839/)).
+
+* Website: [www.vipin.social](https://www.vipin.social/)
+* E-mail: [sainivipin839@gmail.com](mailto:sainivipin839@gmail.com)
+* Questions and bug reports: [GitHub issues](https://github.com/vipin839/rnaseq_pipeline/issues)
 
 License: MIT.

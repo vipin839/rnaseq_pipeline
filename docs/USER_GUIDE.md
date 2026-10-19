@@ -1,5 +1,9 @@
 # User Guide
 
+> This page is the short reference. For the full illustrated guide (installation, every step and tool explained with
+> flowcharts, result interpretation, worked example, glossary and citation), see the
+> **User Guide and Learning Book**: [PDF](RNAseq_Pipeline_User_Guide.pdf) · [Word](RNAseq_Pipeline_User_Guide.docx).
+
 ## Starting
 
 ```bash
