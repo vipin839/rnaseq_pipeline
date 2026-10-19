@@ -65,7 +65,8 @@ FUNCTIONAL = [
     ("stringtie", lambda d: ["stringtie", d / "a.bam", "-G", d / "a.gtf", "-e", "-o", d / "st.gtf"]),
     ("fastp", lambda d: ["fastp", "-i", d / "r1.fq", "-I", d / "r2.fq", "-o", d / "t1.fq", "-O", d / "t2.fq",
                          "-j", d / "fp.json", "-h", d / "fp.html"]),
-    ("fastqc", lambda d: ["fastqc", "-q", "-o", d, d / "r1.fq"]),
+    # the same options as the QC step (qc_manager.run_fastqc), so an incompatible FastQC fails here, not mid-run
+    ("fastqc", lambda d: ["fastqc", "-q", "--outdir", d, "--noextract", d / "r1.fq"]),
 ]
 
 
