@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 # The ONLY place the version is defined (pyproject.toml reads it from here).
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # Data shipped inside the package: R scripts, default configuration, reference catalog, conda env files.
 PACKAGE_DIR = Path(__file__).resolve().parent

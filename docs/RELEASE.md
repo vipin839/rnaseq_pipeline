@@ -3,6 +3,13 @@
 The version is defined in exactly one place, `src/rnaseq_pipeline/__init__.py` (`__version__`). `pyproject.toml` reads
 it, and `tests/unit/test_release.py` fails if the CHANGELOG top entry or the Bioconda recipe disagree.
 
+## Release 1.1.1 (19 October 2026)
+
+Bug-fix release: FastQC pinned below 0.13 (0.13 dropped `--noextract`; fresh 1.1.0 installs failed at raw-read QC),
+and the health check uses the QC step's FastQC options. Verified locally (lint, 274 tests: 266 by default + 8 packaging,
+`twine check`, `--check` with FastQC 0.12.1 → no failures and with FastQC 0.13.0 → FAIL) and in CI (11 jobs). Tag
+`v1.1.1` and GitHub release with sdist + wheel. PyPI and Bioconda: still only on the owner's request.
+
 ## Release readiness of 1.1.0 (P3, 25 September 2026)
 
 | Item | Status |

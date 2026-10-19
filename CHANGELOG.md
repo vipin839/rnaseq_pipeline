@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.1 — 2026-10-19
+
+Bug-fix release. Scientific results are unchanged.
+
+### Fixed
+* **FastQC 0.13 broke new installations.** Old: the runtime environment file and the Bioconda recipe required only
+  `fastqc>=0.12`. FastQC 0.13.0, published on Bioconda after 1.1.0, is a new implementation without the
+  `--noextract` (and `-o`) options, so a fresh install got 0.13.0 and the raw-read QC step stopped with
+  `unrecognized arguments: --noextract`. New: `fastqc>=0.12,<0.13`, which installs the tested 0.12.1. Reason: only
+  tested tool versions are installed. Consequence: environments created from 1.1.1 work; an environment that already
+  contains 0.13 is fixed with `mamba install -n rnaseq-tools -c conda-forge -c bioconda "fastqc=0.12.1"`
+  (docs/TROUBLESHOOTING.md).
+* **The health check now tests FastQC with the QC step's own options.** Old: its mini-job used `-o` while the QC
+  step uses `--outdir` and `--noextract`, so a check could pass while the real step would fail (or the reverse).
+  New: the same options, enforced by a unit test. Consequence: `rnaseq-pipeline --check` reports an incompatible
+  FastQC as FAIL before a run starts.
+
+### Documentation
+* The illustrated **User Guide and Learning Book** (docs/RNAseq_Pipeline_User_Guide.pdf / .docx): installation,
+  every stage and tool explained with flowcharts, result interpretation with a worked example, troubleshooting,
+  glossary and how to cite.
+* README: links to the guide, how to cite, developer contact.
+
 ## 1.1.0 — 2026-09-25
 
 Hardening and packaging release. Scientific results are unchanged: on the synthetic truth dataset the count matrix is

@@ -84,7 +84,7 @@ rnaseq-pipeline --check                      # installation health check
 
 ## How to cite
 
-> Vipin (2026). rnaseq-pipeline: an interactive, validated and resumable bulk RNA-seq pipeline (version 1.1.0)
+> Vipin (2026). rnaseq-pipeline: an interactive, validated and resumable bulk RNA-seq pipeline (version 1.1.1)
 > [Computer software]. GitHub. https://github.com/vipin839/rnaseq_pipeline
 
 Please also cite the tools the pipeline runs (FastQC, MultiQC, fastp, HISAT2, SAMtools, RSeQC, StringTie2,

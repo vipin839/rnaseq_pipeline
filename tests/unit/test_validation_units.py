@@ -729,3 +729,17 @@ def test_unknown_strand_on_counted_features_is_refused(tmp_path, ftype):
     with pytest.raises(PipelineError) as e:
         reference_manager.validate_gtf(f)
     assert "strand" in str(e.value) and e.value.cause and e.value.remedy
+
+
+def test_health_check_fastqc_job_uses_the_qc_step_options(tmp_path, monkeypatch):
+    """FastQC 0.13 dropped --noextract (and -o): the health check must exercise the QC step's own options, so an
+    incompatible FastQC fails in `--check` instead of mid-run."""
+    from rnaseq_pipeline import doctor, qc_manager
+    seen = []
+    monkeypatch.setattr(qc_manager.runner, "run", lambda cmd, **kw: seen.append([str(c) for c in cmd]))
+    fq = tmp_path / "s.fq"
+    fq.write_text("@r\nACGT\n+\nIIII\n")
+    qc_manager.run_fastqc([fq], tmp_path / "out", tmp_path, 2, tmp_path / "log", "test")
+    qc_opts = {t for t in seen[0] if t.startswith("-")} - {"--threads", "--dir"}   # resources, not behaviour
+    check_cmd = [str(c) for c in dict(doctor.FUNCTIONAL)["fastqc"](tmp_path)]
+    assert qc_opts and qc_opts <= set(check_cmd), (qc_opts, check_cmd)
