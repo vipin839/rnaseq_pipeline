@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rnaseq-pipeline"
+name = "bulk-rnaseq-pipeline"
 dynamic = ["version"]
 description = "Interactive, validated and resumable bulk RNA-seq pipeline (HISAT2, featureCounts, StringTie2, DESeq2)"
 readme = "README.md"

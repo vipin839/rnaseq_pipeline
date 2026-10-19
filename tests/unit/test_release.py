@@ -15,7 +15,7 @@ def test_changelog_top_entry_matches_version():
 
 
 def test_bioconda_recipe_version_matches():
-    recipe = (ROOT / "packaging" / "bioconda" / "rnaseq-pipeline" / "meta.yaml").read_text()
+    recipe = (ROOT / "packaging" / "bioconda" / "bulk-rnaseq-pipeline" / "meta.yaml").read_text()
     assert f'{{% set version = "{__version__}" %}}' in recipe
 
 
@@ -47,7 +47,7 @@ def test_bioconda_recipe_requires_what_the_environment_files_install():
             name = re.split(r"[=<>]", d)[0]
             if name not in ("python", "pytest", "pyyaml"):
                 want[name] = d[len(name):]
-    run = (ROOT / "packaging" / "bioconda" / "rnaseq-pipeline" / "meta.yaml").read_text().split("run:")[1].split("test:")[0]
+    run = (ROOT / "packaging" / "bioconda" / "bulk-rnaseq-pipeline" / "meta.yaml").read_text().split("run:")[1].split("test:")[0]
     have = {}
     for line in run.splitlines():
         spec = line.strip().lstrip("- ").split("#")[0].strip()

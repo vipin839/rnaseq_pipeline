@@ -3,6 +3,11 @@
 The version is defined in exactly one place, `src/rnaseq_pipeline/__init__.py` (`__version__`). `pyproject.toml` reads
 it, and `tests/unit/test_release.py` fails if the CHANGELOG top entry or the Bioconda recipe disagree.
 
+## Release 1.1.2 (19 October 2026)
+
+Packaging release: the distribution is renamed `bulk-rnaseq-pipeline` (PyPI refuses `rnaseq-pipeline` as too similar
+to the existing `rnaseqpipeline`), and PyPI publishing runs through Trusted Publishing (`publish.yml`).
+
 ## Release 1.1.1 (19 October 2026)
 
 Bug-fix release: FastQC pinned below 0.13 (0.13 dropped `--noextract`; fresh 1.1.0 installs failed at raw-read QC),
@@ -27,7 +32,7 @@ and the health check uses the QC step's FastQC options. Verified locally (lint, 
 1. Set `__version__` (semantic versioning: MAJOR incompatible, MINOR features, PATCH fixes).
 2. Add the `## X.Y.Z — YYYY-MM-DD` entry at the top of `CHANGELOG.md`. Describe behaviour changes as
    old → new → reason → consequence.
-3. Update `{% set version = "X.Y.Z" %}` in `packaging/bioconda/rnaseq-pipeline/meta.yaml` and reset `build: number` to 0.
+3. Update `{% set version = "X.Y.Z" %}` in `packaging/bioconda/bulk-rnaseq-pipeline/meta.yaml` and reset `build: number` to 0.
 4. Update `docs/VERIFICATION_MATRIX.md` for any requirement whose status changed.
 
 ## 2. Verify locally (all must pass)
@@ -56,29 +61,29 @@ packaging tests, and the full integration suite with the real tools. Do not cont
 
 Create the GitHub release from the tag and attach `dist/*` (sdist and wheel).
 
-## 4. PyPI (optional)
+## 4. PyPI (automatic, Trusted Publishing)
 
-```bash
-twine upload dist/*            # needs a PyPI account and API token
-```
+Publishing the GitHub release starts `.github/workflows/publish.yml`, which downloads the release's sdist and wheel,
+checks their names and version against the tag, runs `twine check --strict` and uploads them to PyPI as
+`bulk-rnaseq-pipeline`. PyPI trusts exactly this workflow (owner `vipin839`, repository `rnaseq_pipeline`, workflow
+`publish.yml`, environment `pypi`); no token exists. To retry: Actions → "Publish to PyPI" → Run workflow → the tag.
 
-After this, `pipx install rnaseq-pipeline` works. Verify it in a clean shell: `pipx install rnaseq-pipeline &&
-rnaseq-pipeline --version`.
+Verify in a clean shell: `pipx install bulk-rnaseq-pipeline && rnaseq-pipeline --version`.
 
 ## 5. Bioconda
 
 1. Fill the source checksum from the published tag:
    `packaging/bioconda/update_sha256.sh`
-2. Fork https://github.com/bioconda/bioconda-recipes, copy `packaging/bioconda/rnaseq-pipeline/` to
-   `recipes/rnaseq-pipeline/`, commit on a branch.
+2. Fork https://github.com/bioconda/bioconda-recipes, copy `packaging/bioconda/bulk-rnaseq-pipeline/` to
+   `recipes/bulk-rnaseq-pipeline/`, commit on a branch.
 3. Check locally (bioconda-utils environment: `mamba create -n bioconda-utils -c conda-forge -c bioconda bioconda-utils`):
    ```bash
-   bioconda-utils lint recipes config.yml --packages rnaseq-pipeline
-   bioconda-utils build recipes config.yml --packages rnaseq-pipeline          # add --docker --mulled-build-and-test if Docker is available
+   bioconda-utils lint recipes config.yml --packages bulk-rnaseq-pipeline
+   bioconda-utils build recipes config.yml --packages bulk-rnaseq-pipeline          # add --docker --mulled-build-and-test if Docker is available
    ```
 4. Open the pull request. Bioconda CI builds the package and runs the recipe tests, including
    `rnaseq-pipeline --check`, which runs HISAT2, samtools, featureCounts, StringTie, fastp, FastQC and DESeq2 on a tiny job.
-5. After it is merged: `mamba create -n rnaseq -c conda-forge -c bioconda rnaseq-pipeline`.
+5. After it is merged: `mamba create -n rnaseq -c conda-forge -c bioconda bulk-rnaseq-pipeline`.
 
 Later versions are usually picked up by the Bioconda autobump bot from new GitHub tags.
 

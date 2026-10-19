@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.2 — 2026-10-19
+
+Packaging release for PyPI and Bioconda. The program, its command and its results are unchanged.
+
+### Packaging
+* **The distribution is named `bulk-rnaseq-pipeline`.** Old: `rnaseq-pipeline`. Reason: PyPI refuses new project
+  names that differ from an existing one only by punctuation and look-alike characters, and `rnaseqpipeline`
+  already exists. Consequence: install with `pipx install bulk-rnaseq-pipeline` (and, once accepted,
+  `mamba install -c bioconda bulk-rnaseq-pipeline`). The command (`rnaseq-pipeline`), the Python package
+  (`rnaseq_pipeline`), the configuration file and existing projects are unchanged; the release files are now named
+  `bulk_rnaseq_pipeline-<version>-…`.
+* **PyPI publishing with Trusted Publishing.** `.github/workflows/publish.yml` uploads the sdist and wheel attached to
+  a published GitHub release, after checking their names and version against the tag and running `twine check`.
+  No API token is stored anywhere.
+* The Bioconda recipe moved to `packaging/bioconda/bulk-rnaseq-pipeline/`.
+
 ## 1.1.1 — 2026-10-19
 
 Bug-fix release. Scientific results are unchanged.

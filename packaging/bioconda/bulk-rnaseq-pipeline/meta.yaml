@@ -1,5 +1,5 @@
-{% set name = "rnaseq-pipeline" %}
-{% set version = "1.1.1" %}
+{% set name = "bulk-rnaseq-pipeline" %}
+{% set version = "1.1.2" %}
 
 package:
   name: {{ name }}

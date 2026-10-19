@@ -65,7 +65,7 @@ need PyYAML: `python3 -m pip install --user pyyaml`.
 
 ## Option C — everything with one conda command (Bioconda; after release)
 
-A Bioconda recipe is prepared in `packaging/bioconda/rnaseq-pipeline/meta.yaml`. It installs the application **and**
+A Bioconda recipe is prepared in `packaging/bioconda/bulk-rnaseq-pipeline/meta.yaml`. It installs the application **and**
 the whole scientific runtime into one environment:
 
 ```bash

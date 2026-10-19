@@ -26,7 +26,7 @@ VERSION = next(line.split('"')[1] for line in (ROOT / "src" / "rnaseq_pipeline" 
 def wheel(tmp_path_factory):
     out = tmp_path_factory.mktemp("dist")
     subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "-q", "-w", str(out), str(ROOT)], check=True)
-    whl = next(out.glob("rnaseq_pipeline-*.whl"))
+    whl = next(out.glob("bulk_rnaseq_pipeline-*.whl"))
     assert VERSION in whl.name
     return whl
 
