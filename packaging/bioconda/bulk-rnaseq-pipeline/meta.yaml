@@ -8,7 +8,7 @@ package:
 source:
   url: https://github.com/vipin839/rnaseq_pipeline/archive/refs/tags/v{{ version }}.tar.gz
   # Filled by `packaging/bioconda/update_sha256.sh` after the v{{ version }} tag exists (see docs/RELEASE.md).
-  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+  sha256: 5f6e2fe165d49ab31b4d5c4b25f59c7abcfc6849876ae12d8ba2dc41605758bc
 
 build:
   number: 0
